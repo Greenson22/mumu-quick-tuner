@@ -25,9 +25,12 @@ from PyQt6.QtWidgets import (
 
 from app import models
 from app.config import AppConfig
-from app.mumu import MuMuClient, MuMuError
+from app.mumu import MuMuClient, MuMuError, pick_device
 from app.services.backup import create_backup, resolve_vm_dir
+from app.services.group_apply import BatchResult, run_batch
+from app.services.groups import GroupStore
 from app.services.profiles import ProfileStore
+from app.ui.groups import GroupsSection
 from app.ui.sections import (
     GrafisSection,
     PerformaSection,
@@ -57,18 +60,24 @@ class Worker(QThread):
 
 
 class MainWindow(QMainWindow):
+    groupProgress = pyqtSignal(object)
+
     def __init__(self, config: AppConfig, client: MuMuClient) -> None:
         super().__init__()
         self.config = config
         self.client = client
         self.store = ProfileStore()
+        self.group_store = GroupStore()
 
         self.index: str | None = None
         self.device: dict = {}
         self.info: dict = {}
         self.settings: dict[str, str] = {}
+        self.devices: dict[str, dict] = {}
         self._busy = False
         self._workers: list[Worker] = []
+        self._last_failed: list[tuple[str, str]] = []
+        self._last_batch: tuple[str, str, dict[str, str], bool] | None = None
 
         self.setWindowTitle("MuMu Quick Tuner")
         self.resize(960, 780)
@@ -134,17 +143,26 @@ class MainWindow(QMainWindow):
         self.grafis = GrafisSection()
         self.performa = PerformaSection()
         self.profiles = ProfilesSection(self.store)
+        self.groups = GroupsSection(self.store, self.group_store)
 
         self.tabs.addTab(self.tampilan, "Tampilan")
         self.tabs.addTab(self.grafis, "Grafis")
         self.tabs.addTab(self.performa, "Performa")
         self.tabs.addTab(self.profiles, "Profil")
+        self.tabs.addTab(self.groups, "Grup")
         layout.addWidget(self.tabs, 1)
 
         self.profiles.loadRequested.connect(self._load_profile_into_form)
         self.profiles.applyRequested.connect(self._apply_profile)
         self.profiles.saveRequested.connect(self._save_profile)
         self.profiles.deleteRequested.connect(self._delete_profile)
+
+        self.groups.refreshRequested.connect(self.refresh)
+        self.groups.applyRequested.connect(self._on_group_apply)
+        self.groups.copyCurrentRequested.connect(self._on_group_copy_current)
+        self.groups.savePresetRequested.connect(self._save_preset_from_current)
+        self.groups.retryRequested.connect(self._retry_failed)
+        self.groupProgress.connect(self.groups.update_progress)
 
         # action bar
         actions = QHBoxLayout()
@@ -215,31 +233,57 @@ class MainWindow(QMainWindow):
         self._set_busy(True, "Membaca konfigurasi device…")
 
         def work():
-            index, device = self.client.find_device(
-                self.config.vm_name, self.config.vm_index
-            )
+            devices = self.client.list_devices()
+            try:
+                index, device = pick_device(
+                    devices, self.config.vm_name, self.config.vm_index
+                )
+            except MuMuError as exc:
+                return devices, None, {}, {}, {}, str(exc)
             info = self.client.get_info(index)
             settings = self.client.get_settings(index)
-            return index, device, info, settings
+            return devices, index, device, info, settings, ""
 
         self._run_async(work, self._on_loaded)
 
     def _on_loaded(self, payload) -> None:
-        index, device, info, settings = payload
-        self.index = index
-        self.device = device
-        self.info = info
-        self.settings = settings
+        devices, index, device, info, settings, active_error = payload
+        self.devices = devices
 
-        self._update_header()
-        for section in (self.tampilan, self.grafis, self.performa):
-            section.load(settings)
+        if index is None:
+            self.index = None
+            self.device = {}
+            self.info = {}
+            self.settings = {}
+            self.device_name.setText("Tidak ada device aktif")
+            self.device_meta.setText(active_error or "Pilih device lewat .env.")
+            self.badge.setText("Tidak aktif")
+            self.badge.setProperty("state", "warn")
+            self.badge.style().unpolish(self.badge)
+            self.badge.style().polish(self.badge)
+        else:
+            self.index = index
+            self.device = device
+            self.info = info
+            self.settings = settings
+            self._update_header()
+            for section in (self.tampilan, self.grafis, self.performa):
+                section.load(settings)
+
         self.profiles.reload()
+        self.groups.set_devices(devices)
+        self.groups.reload_presets()
 
         self._set_busy(False, "Konfigurasi dimuat.")
-        self.statusBar().showMessage(
-            f"Device {device.get('name', index)} siap diatur."
-        )
+        if index is None:
+            self.statusBar().showMessage(
+                f"{len(devices)} device terdeteksi, tetapi device aktif tidak ditemukan."
+            )
+        else:
+            self.statusBar().showMessage(
+                f"{len(devices)} device terdeteksi. Device "
+                f"{device.get('name', index)} siap diatur."
+            )
 
     def _update_header(self) -> None:
         name = self.device.get("name") or self.config.vm_name or "Device"
@@ -283,6 +327,364 @@ class MainWindow(QMainWindow):
     def _apply_profile(self, changes: dict[str, str]) -> None:
         self._load_profile_into_form(changes)
         self._apply_changes()
+
+    # --------------------------------------------------------------- group
+    def _on_group_apply(self, group: str, preset_name: str, relaunch: bool) -> None:
+        if self._busy:
+            return
+        preset = self.store.get(preset_name)
+        if preset is None:
+            QMessageBox.warning(
+                self, "Preset tidak ditemukan", f"Preset '{preset_name}' tidak ada."
+            )
+            return
+        if not self.devices:
+            QMessageBox.warning(
+                self, "Belum ada data device", "Muat ulang daftar device dulu."
+            )
+            return
+
+        found, missing = self.group_store.resolve(group, self.devices)
+        if not found:
+            QMessageBox.warning(
+                self,
+                "Grup kosong",
+                f"Tidak ada device dari grup '{group}' yang terdeteksi.",
+            )
+            return
+
+        if not self._confirm_group_shutdown(found, f"preset '{preset_name}'"):
+            return
+
+        targets = [(name, index) for index, name, _device in found]
+        self._start_batch(group, preset_name, dict(preset), targets, missing, relaunch)
+
+    def _on_group_copy_current(self, group: str) -> None:
+        if self._busy:
+            return
+        if self.index is None or not self.settings:
+            QMessageBox.warning(
+                self,
+                "Device aktif belum siap",
+                "Muat ulang data device aktif terlebih dahulu.",
+            )
+            return
+
+        preset = models.filter_managed(self._collect_all())
+        if not preset:
+            QMessageBox.warning(
+                self, "Tidak ada setting", "Form device aktif tidak berisi setting."
+            )
+            return
+
+        found, missing = self.group_store.resolve(group, self.devices)
+        if not found:
+            QMessageBox.warning(
+                self,
+                "Grup kosong",
+                f"Tidak ada device dari grup '{group}' yang terdeteksi.",
+            )
+            return
+
+        if not self._confirm_group_shutdown(found, "setting device aktif"):
+            return
+
+        targets = [(name, index) for index, name, _device in found]
+        self._start_batch(
+            group,
+            "Device aktif",
+            preset,
+            targets,
+            missing,
+            self.groups.relaunch_check.isChecked(),
+        )
+
+    def _confirm_group_shutdown(
+        self, found: list[tuple[str, str, dict]], action: str
+    ) -> bool:
+        running = [
+            (index, name)
+            for index, name, device in found
+            if device.get("is_process_started")
+        ]
+        if not running:
+            return True
+
+        names = "\n".join(f"• {name}  (index {index})" for index, name in running)
+        relaunch_note = (
+            "Device akan dinyalakan kembali otomatis setelah selesai."
+            if self.groups.relaunch_check.isChecked()
+            else "Device TIDAK akan dinyalakan kembali otomatis."
+        )
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Device sedang berjalan")
+        box.setText(
+            f"Akan menerapkan {action} ke grup.\n\n"
+            "MuMu hanya menerima perubahan setting saat device berhenti. "
+            f"Device berikut akan dimatikan lebih dulu:\n\n{names}\n\n"
+            f"{relaunch_note}\n\nLanjutkan?"
+        )
+        proceed = box.addButton("Matikan && Terapkan", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Batal", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is proceed
+
+    def _start_batch(
+        self,
+        group: str,
+        preset_name: str,
+        preset: dict[str, str],
+        targets: list[tuple[str, str]],
+        missing: list,
+        relaunch: bool,
+    ) -> None:
+        if not targets and not missing:
+            QMessageBox.information(
+                self, "Tidak ada device", "Grup ini belum memiliki anggota."
+            )
+            return
+
+        preset = models.filter_managed(preset)
+        self._last_batch = (group, preset_name, dict(preset), relaunch)
+        self._last_failed = []
+
+        rows = list(targets) + [
+            (ref.name, ref.index or "?") for ref in missing
+        ]
+        self.groups.start_progress(rows)
+        self._set_busy(
+            True, f"Menerapkan '{preset_name}' ke grup '{group}'…"
+        )
+
+        def emit(payload: dict) -> None:
+            self.groupProgress.emit(payload)
+
+        def work():
+            devices = self.client.list_devices()
+            by_name = {
+                str(device.get("name", "")).strip(): (str(index), device)
+                for index, device in devices.items()
+            }
+
+            resolved: list[tuple[str, str, dict]] = []
+            failures: list[BatchResult] = []
+            seen: set[str] = set()
+
+            for name, fallback_index in list(targets) + [
+                (ref.name, ref.index or "?") for ref in missing
+            ]:
+                if name in seen:
+                    continue
+                seen.add(name)
+                match = by_name.get(name)
+                if match is None:
+                    failures.append(
+                        BatchResult(
+                            name, str(fallback_index), "failed",
+                            "Device tidak ditemukan.",
+                        )
+                    )
+                    emit(
+                        {
+                            "name": name,
+                            "index": str(fallback_index),
+                            "phase": "error",
+                            "message": "Device tidak ditemukan.",
+                            "status": "failed",
+                        }
+                    )
+                    continue
+                index, device = match
+                resolved.append((name, index, device))
+
+            stopped: list[tuple[str, str]] = []
+            shutdown_failed: set[str] = set()
+            for name, index, device in resolved:
+                if not device.get("is_process_started"):
+                    continue
+                emit(
+                    {
+                        "name": name,
+                        "index": index,
+                        "phase": "shutdown",
+                        "message": "Mematikan device…",
+                        "status": "",
+                    }
+                )
+                try:
+                    self.client.control(index, "shutdown")
+                    if not self.client.wait_stopped(index, 45):
+                        raise MuMuError(
+                            "Device tidak berhenti dalam 45 detik."
+                        )
+                    stopped.append((name, index))
+                except Exception as exc:  # noqa: BLE001 - lanjut device lain
+                    shutdown_failed.add(name)
+                    failures.append(
+                        BatchResult(
+                            name, index, "failed",
+                            f"Gagal mematikan device: {exc}",
+                        )
+                    )
+                    emit(
+                        {
+                            "name": name,
+                            "index": index,
+                            "phase": "error",
+                            "message": f"Gagal mematikan: {exc}",
+                            "status": "failed",
+                        }
+                    )
+
+            valid = [
+                (name, index)
+                for name, index, _device in resolved
+                if name not in shutdown_failed
+            ]
+            results = run_batch(
+                self.client,
+                valid,
+                preset,
+                self.config.backup_dir,
+                progress=emit,
+            )
+            results.extend(failures)
+
+            if relaunch:
+                for name, index in stopped:
+                    emit(
+                        {
+                            "name": name,
+                            "index": index,
+                            "phase": "launch",
+                            "message": "Menyalakan kembali device…",
+                            "status": "",
+                        }
+                    )
+                    try:
+                        self.client.control(index, "launch")
+                    except Exception as exc:  # noqa: BLE001
+                        results.append(
+                            BatchResult(
+                                name, index, "failed",
+                                f"Setting selesai, tetapi gagal menyalakan: {exc}",
+                            )
+                        )
+                        emit(
+                            {
+                                "name": name,
+                                "index": index,
+                                "phase": "error",
+                                "message": f"Gagal menyalakan: {exc}",
+                                "status": "failed",
+                            }
+                        )
+
+            return results, [name for name, _index in stopped]
+
+        self._run_async(
+            work,
+            lambda payload: self._on_group_batch_done(payload),
+        )
+
+    def _on_group_batch_done(self, payload) -> None:
+        results, relaunched = payload
+        results = list(results)
+        self._set_busy(False, "Batch selesai.")
+
+        group, preset_name, _preset, _relaunch = self._last_batch or (
+            "-", "-", {}, False
+        )
+        if self.store.get(preset_name) is not None:
+            self.group_store.set_last_preset(group, preset_name)
+
+        self._last_failed = [
+            (result.name, result.index)
+            for result in results
+            if result.status == "failed"
+        ]
+        self.groups.set_retry_enabled(bool(self._last_failed))
+
+        success = sum(1 for result in results if result.status == "success")
+        unchanged = sum(1 for result in results if result.status == "unchanged")
+        failed = [result for result in results if result.status == "failed"]
+
+        message = (
+            f"Preset '{preset_name}' diterapkan ke grup '{group}'.\n\n"
+            f"Berhasil diubah: {success}\n"
+            f"Tidak berubah: {unchanged}\n"
+            f"Gagal: {len(failed)}"
+        )
+        if failed:
+            lines = "\n".join(
+                f"• {result.name}: {result.message}" for result in failed[:10]
+            )
+            if len(failed) > 10:
+                lines += f"\n… dan {len(failed) - 10} device lain."
+            message += "\n\nDevice gagal:\n" + lines
+            message += "\n\nGunakan tombol 'Ulangi yang Gagal' di tab Grup."
+        if relaunched:
+            message += f"\n\n{len(relaunched)} device berjalan dinyalakan kembali."
+
+        QMessageBox.information(self, "Batch selesai", message)
+        self.refresh()
+
+    def _retry_failed(self) -> None:
+        if self._busy or not self._last_failed:
+            return
+        if self._last_batch is None:
+            return
+        group, preset_name, preset, relaunch = self._last_batch
+        self._start_batch(
+            group, preset_name, preset, list(self._last_failed), [], relaunch
+        )
+
+    def _save_preset_from_current(self) -> None:
+        if self.index is None or not self.settings:
+            QMessageBox.warning(
+                self,
+                "Device aktif belum siap",
+                "Muat ulang data device aktif terlebih dahulu.",
+            )
+            return
+
+        name, ok = QInputDialog.getText(
+            self, "Simpan Preset", "Nama preset baru:"
+        )
+        name = name.strip()
+        if not ok or not name:
+            return
+
+        builtin_names = {
+            item[0] for item in self.store.all_profiles() if item[2]
+        }
+        if name in builtin_names:
+            QMessageBox.warning(
+                self,
+                "Nama terpakai",
+                "Nama tersebut dipakai preset bawaan. Gunakan nama lain.",
+            )
+            return
+
+        if name in self.store.load_custom():
+            if (
+                QMessageBox.question(
+                    self, "Timpa preset", f"Preset '{name}' sudah ada. Timpa?"
+                )
+                != QMessageBox.StandardButton.Yes
+            ):
+                return
+
+        changes = models.filter_managed(self._collect_all())
+        self.store.save_custom(name, changes)
+        self.profiles.reload()
+        self.groups.reload_presets()
+        index = self.groups.preset_combo.findData(name)
+        if index >= 0:
+            self.groups.preset_combo.setCurrentIndex(index)
+        self.statusBar().showMessage(f"Preset '{name}' disimpan.")
 
     # --------------------------------------------------------------- apply
     def _apply_changes(self) -> None:
@@ -446,6 +848,7 @@ class MainWindow(QMainWindow):
 
         self.store.save_custom(name, self._collect_all())
         self.profiles.reload()
+        self.groups.reload_presets()
         self.statusBar().showMessage(f"Profil '{name}' disimpan.")
 
     def _delete_profile(self, name: str) -> None:
@@ -456,6 +859,7 @@ class MainWindow(QMainWindow):
             return
         self.store.delete_custom(name)
         self.profiles.reload()
+        self.groups.reload_presets()
 
     # --------------------------------------------------------------- admin
     def _ensure_writable(self) -> bool:

@@ -18,6 +18,32 @@ def _no_window_flag() -> int:
     return 0
 
 
+def pick_device(
+    devices: dict[str, dict], name: str, index: str | None = None
+) -> tuple[str, dict]:
+    """Pilih device dari hasil info -v all berdasarkan index atau nama."""
+    if index:
+        if str(index) in devices:
+            return str(index), devices[str(index)]
+        raise MuMuError(f"Device dengan index {index} tidak ditemukan.")
+
+    if not name:
+        raise MuMuError(
+            "MUMU_VM_NAME kosong di .env dan MUMU_VM_INDEX tidak diisi."
+        )
+
+    for idx, device in devices.items():
+        if str(device.get("name", "")).strip() == name:
+            return str(idx), device
+
+    available = ", ".join(
+        f"{idx}:{device.get('name', '?')}" for idx, device in devices.items()
+    )
+    raise MuMuError(
+        f"Device bernama '{name}' tidak ditemukan.\n\nDevice tersedia: {available}"
+    )
+
+
 class MuMuClient:
     def __init__(self, manager: Path, timeout: int = 120) -> None:
         self.manager = Path(manager)
@@ -98,28 +124,7 @@ class MuMuClient:
         return devices
 
     def find_device(self, name: str, index: str | None = None) -> tuple[str, dict]:
-        devices = self.list_devices()
-
-        if index:
-            if index in devices:
-                return index, devices[index]
-            raise MuMuError(f"Device dengan index {index} tidak ditemukan.")
-
-        if not name:
-            raise MuMuError(
-                "MUMU_VM_NAME kosong di .env dan MUMU_VM_INDEX tidak diisi."
-            )
-
-        for idx, device in devices.items():
-            if str(device.get("name", "")).strip() == name:
-                return idx, device
-
-        available = ", ".join(
-            f"{idx}:{device.get('name', '?')}" for idx, device in devices.items()
-        )
-        raise MuMuError(
-            f"Device bernama '{name}' tidak ditemukan.\n\nDevice tersedia: {available}"
-        )
+        return pick_device(self.list_devices(), name, index)
 
     def get_info(self, index: str) -> dict:
         return self._run("info", "-v", str(index))

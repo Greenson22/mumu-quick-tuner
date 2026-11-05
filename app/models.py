@@ -172,3 +172,15 @@ def describe_change(key: str, old: str, new: str) -> str:
         f"{LABELS.get(key, key)}: "
         f"{describe_value(key, old)} \u2192 {describe_value(key, new)}"
     )
+
+
+def filter_managed(changes: dict[str, str] | None) -> dict[str, str]:
+    """Ambil hanya key yang boleh diubah aplikasi ini."""
+    if not changes:
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in changes.items()
+        if key in MANAGED_KEYS
+    }
+

@@ -61,6 +61,38 @@ class ProfileTests(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["A"]["vertical_sync"], "true")
 
+    def test_get_builtin_and_custom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProfileStore(Path(tmp) / "profiles.json")
+            self.assertIsNotNone(store.get("Hemat"))
+            self.assertIsNone(store.get("TidakAda"))
+
+            store.save_custom("Malam", {"max_frame_rate": "60"})
+            self.assertEqual(store.get("Malam"), {"max_frame_rate": "60"})
+
+    def test_save_custom_filters_unmanaged_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProfileStore(Path(tmp) / "profiles.json")
+            store.save_custom(
+                "Aman",
+                {
+                    "max_frame_rate": "60",
+                    "player_name": "Jangan diubah",
+                    "phone_imei": "123",
+                },
+            )
+            self.assertEqual(store.get("Aman"), {"max_frame_rate": "60"})
+
+    def test_rename_custom_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProfileStore(Path(tmp) / "profiles.json")
+            store.save_custom("Lama", {"max_frame_rate": "60"})
+            self.assertEqual(store.rename("Lama", "Baru"), "Baru")
+            self.assertIsNone(store.get("Lama"))
+            self.assertEqual(store.get("Baru"), {"max_frame_rate": "60"})
+            with self.assertRaises(ValueError):
+                store.rename("Baru", "Hemat")
+
 
 class BackupTests(unittest.TestCase):
     def test_resolve_vm_dir(self) -> None:

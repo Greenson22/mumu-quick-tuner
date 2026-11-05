@@ -7,6 +7,8 @@ import logging
 import os
 from pathlib import Path
 
+from app import models
+
 logger = logging.getLogger(__name__)
 
 BUILTIN_PROFILES: dict[str, dict[str, str]] = {
@@ -82,7 +84,7 @@ class ProfileStore:
 
     def save_custom(self, name: str, changes: dict[str, str]) -> None:
         profiles = self.load_custom()
-        profiles[name] = {str(k): str(v) for k, v in changes.items()}
+        profiles[name] = models.filter_managed(changes)
         self._write(profiles)
 
     def delete_custom(self, name: str) -> None:
@@ -90,6 +92,33 @@ class ProfileStore:
         if name in profiles:
             del profiles[name]
             self._write(profiles)
+
+    def rename(self, old: str, new: str) -> str:
+        new = new.strip()
+        if not new:
+            raise ValueError("Nama preset tidak boleh kosong.")
+        if old in BUILTIN_PROFILES:
+            raise ValueError("Preset bawaan tidak bisa diganti namanya.")
+        profiles = self.load_custom()
+        if old not in profiles:
+            raise ValueError(f"Preset '{old}' tidak ditemukan.")
+        if new in BUILTIN_PROFILES or new in profiles:
+            raise ValueError(f"Preset '{new}' sudah ada.")
+        changes = profiles.pop(old)
+        profiles[new] = changes
+        self._write(profiles)
+        return new
+
+    def get(self, name: str) -> dict[str, str] | None:
+        if name in BUILTIN_PROFILES:
+            return dict(BUILTIN_PROFILES[name])
+        custom = self.load_custom()
+        if name in custom:
+            return dict(custom[name])
+        return None
+
+    def is_builtin(self, name: str) -> bool:
+        return name in BUILTIN_PROFILES
 
     def _write(self, profiles: dict[str, dict[str, str]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

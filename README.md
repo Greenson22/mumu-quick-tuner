@@ -18,9 +18,17 @@ diterapkan.
   resmi MuMu (nilai `best` ditandai).
 - **Profil** — preset bawaan Hemat/Seimbang/Performa dan profil custom
   tersimpan di `%APPDATA%\mumu-quick-tuner\profiles.json`.
+- **Grup** — deteksi semua device MuMu, pilih beberapa menjadi grup bernama,
+  lalu terapkan preset yang sama ke seluruh anggota sekaligus tanpa mengubah
+  nama device. Grup tersimpan di
+  `%APPDATA%\mumu-quick-tuner\groups.json`.
+- **Preset bernama** — simpan setting dari form device aktif sebagai preset
+  baru, lalu pakai ulang kapan saja dari tab Profil maupun tab Grup.
 - Backup otomatis config ke `backups/` sebelum setiap perubahan.
 - Deteksi device berjalan; karena MuMu hanya menerima perubahan setting saat
   device berhenti, aplikasi menawarkan **Matikan & Terapkan** lebih dulu.
+  Untuk batch grup, device yang berjalan dimatikan lalu dinyalakan kembali
+  otomatis (opsional).
 - Peringatan dan opsi jalankan ulang sebagai Administrator bila folder MuMu
   tidak bisa ditulis.
 
@@ -73,6 +81,30 @@ Jika MuMu terpasang di folder lain, ubah `MUMU_MANAGER`.
    nyalakan lagi lewat tombol **Restart Device**.
 5. Gunakan tab **Profil** untuk menerapkan kombinasi setting sekaligus.
 
+## Mengelola grup device
+
+1. Buka tab **Grup**. Semua device yang dibuat di MuMu akan terdeteksi
+   otomatis beserta index dan statusnya.
+2. Centang device yang ingin digabung, klik **Buat Grup…**, lalu beri nama
+   grup. Grup disimpan permanen berdasarkan **nama device**, bukan index —
+   jadi tetap benar walau index bergeser.
+3. Untuk mengubah anggota, pilih grup lalu gunakan **Tambah Pilihan**,
+   **Keluarkan Pilihan**, **Ganti Nama…**, atau **Hapus**.
+4. Pilih preset pada dropdown **Preset setting**, lalu klik
+   **Terapkan ke Grup**. Hanya setting yang berbeda yang dikirim, dan setiap
+   device diverifikasi ulang setelah ditulis.
+5. Ingin memakai setting dari device yang sedang dibuka? Klik
+   **Samakan dengan Device Aktif**.
+6. Ingin menyimpan setting tersebut sebagai preset baru? Klik
+   **Simpan Setting Aktif sebagai Preset…** dan beri nama. Preset langsung
+   muncul di dropdown tab Grup dan tab Profil.
+7. Jika ada device yang gagal, proses tetap berlanjut ke device lain. Klik
+   **Ulangi yang Gagal** untuk mencoba lagi hanya pada device tersebut.
+
+Nama device tidak pernah diubah: aplikasi tidak mengirim key `player_name`
+atau identitas HP, dan preset dibatasi ke 17 key yang dikelola (resolusi, FPS,
+renderer, GPU, CPU/RAM).
+
 ## Pemetaan setting ke MuMuManager
 
 | Tab | Key CLI |
@@ -97,8 +129,11 @@ app/
   models.py            # key, label, parsing metadata
   services/backup.py   # backup config sebelum apply
   services/profiles.py # preset & profil custom
-  ui/main_window.py    # jendela, worker thread, alur apply
+  services/groups.py   # penyimpanan grup device
+  services/group_apply.py # eksekutor batch per device
+  ui/main_window.py    # jendela, worker thread, alur apply & batch
   ui/sections.py       # tab Tampilan/Grafis/Performa/Profil
+  ui/groups.py         # tab Grup
   ui/widgets.py        # tema & komponen
 tests/                 # unit test tanpa kebutuhan MuMu/PyQt
 ```

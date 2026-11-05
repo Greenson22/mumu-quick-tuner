@@ -201,6 +201,35 @@ QListWidget::item:selected {
 QListWidget::item:hover:!selected {
     background: #1d2433;
 }
+QTableWidget {
+    background: #111520;
+    alternate-background-color: #161b27;
+    border: 1px solid #2a3142;
+    border-radius: 10px;
+    gridline-color: #232a3b;
+    outline: none;
+    selection-background-color: #2f3b55;
+    selection-color: #ffffff;
+}
+QTableWidget::item {
+    padding: 6px 8px;
+}
+QTableWidget::item:selected {
+    background: #2f3b55;
+    color: #ffffff;
+}
+QHeaderView::section {
+    background: #1c2130;
+    color: #8b93a7;
+    border: none;
+    border-bottom: 1px solid #2a3142;
+    padding: 7px 8px;
+    font-weight: 600;
+}
+QTableCornerButton::section {
+    background: #1c2130;
+    border: none;
+}
 QScrollArea {
     border: none;
     background: transparent;
