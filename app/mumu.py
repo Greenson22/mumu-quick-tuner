@@ -18,6 +18,74 @@ def _no_window_flag() -> int:
     return 0
 
 
+_PACKAGE_KEYS = (
+    "package",
+    "package_name",
+    "packageName",
+    "bundle",
+    "bundle_id",
+    "bundleId",
+)
+_LABEL_KEYS = ("label", "name", "app_name", "appName", "title")
+
+
+def _looks_like_package(value: str) -> bool:
+    value = value.strip()
+    return "." in value and " " not in value
+
+
+def _extract_apps(data: object) -> list[tuple[str, str]]:
+    """Ambil pasangan (package, label) dari output app info yang bervariasi."""
+    found: dict[str, str] = {}
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            package = ""
+            for key in _PACKAGE_KEYS:
+                value = node.get(key)
+                if isinstance(value, str) and _looks_like_package(value):
+                    package = value.strip()
+                    break
+
+            label = ""
+            for key in _LABEL_KEYS:
+                value = node.get(key)
+                if isinstance(value, str) and value.strip():
+                    label = value.strip()
+                    break
+
+            if not package:
+                for key, value in node.items():
+                    if not isinstance(key, str) or not _looks_like_package(key):
+                        continue
+                    if isinstance(value, dict):
+                        package = key.strip()
+                        for label_key in _LABEL_KEYS:
+                            raw_label = value.get(label_key)
+                            if isinstance(raw_label, str) and raw_label.strip():
+                                label = raw_label.strip()
+                                break
+                        break
+                    if isinstance(value, str):
+                        package = key.strip()
+                        label = label or value.strip()
+                        break
+
+            if package:
+                existing = found.get(package)
+                if existing is None or (label and existing == package):
+                    found[package] = label or package
+
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return sorted(found.items(), key=lambda item: item[1].lower())
+
+
 def pick_device(
     devices: dict[str, dict], name: str, index: str | None = None
 ) -> tuple[str, dict]:
@@ -152,6 +220,19 @@ class MuMuClient:
     def control(self, index: str, action: str) -> None:
         self._run("control", "-v", str(index), action)
 
+    def launch_app(self, index: str, package: str) -> None:
+        package = package.strip()
+        if not package:
+            raise MuMuError("Nama paket aplikasi masih kosong.")
+        self._run(
+            "control", "-v", str(index), "app", "launch", "--package", package
+        )
+
+    def list_installed_apps(self, index: str) -> list[tuple[str, str]]:
+        """Daftar (package, label) aplikasi terpasang di device."""
+        data = self._run("control", "-v", str(index), "app", "info", "-i")
+        return _extract_apps(data)
+
     def wait_stopped(self, index: str, timeout: int = 45) -> bool:
         import time
 
@@ -162,3 +243,58 @@ class MuMuClient:
                 return True
             time.sleep(1.0)
         return False
+
+    def wait_android_started(self, index: str, timeout: int = 120) -> bool:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            info = self.get_info(index)
+            if info.get("is_android_started", False):
+                return True
+            time.sleep(1.0)
+        return False
+
+    def launch_device_and_app(
+        self, index: str, package: str, timeout: int = 120
+    ) -> None:
+        package = package.strip()
+        if not package:
+            raise MuMuError("Nama paket aplikasi masih kosong.")
+        self.control(index, "launch")
+        self.open_app_when_ready(index, package, timeout)
+
+    def open_app_when_ready(
+        self, index: str, package: str, timeout: int = 120, attempts: int = 5
+    ) -> None:
+        """Buka aplikasi setelah Android siap, dengan beberapa kali percobaan.
+
+        Percobaan ulang diperlukan saat device baru di-restart: Android bisa
+        sempat melaporkan siap sebelum benar-benar menerima perintah buka app.
+        """
+        import time
+
+        package = package.strip()
+        if not package:
+            raise MuMuError("Nama paket aplikasi masih kosong.")
+
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+
+        for _ in range(max(1, attempts)):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not self.wait_android_started(index, int(remaining)):
+                break
+            try:
+                self.launch_app(index, package)
+                return
+            except MuMuError as exc:
+                last_error = exc
+                time.sleep(3.0)
+
+        detail = f" ({last_error})" if last_error else ""
+        raise MuMuError(
+            f"Aplikasi {package} belum bisa dibuka dalam {timeout} detik{detail}."
+        )

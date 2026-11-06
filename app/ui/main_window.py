@@ -11,6 +11,7 @@ from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -30,6 +31,7 @@ from app.services.backup import create_backup, resolve_vm_dir
 from app.services.group_apply import BatchResult, run_batch
 from app.services.groups import GroupStore
 from app.services.profiles import ProfileStore
+from app.services.settings import AppPrefs, SettingsStore
 from app.ui.groups import GroupsSection
 from app.ui.sections import (
     GrafisSection,
@@ -37,8 +39,19 @@ from app.ui.sections import (
     ProfilesSection,
     TampilanSection,
 )
+from app.ui.widgets import checkbox
 
 logger = logging.getLogger(__name__)
+
+COMMON_APPS: tuple[tuple[str, str], ...] = (
+    ("WhatsApp", "com.whatsapp"),
+    ("Google Chrome", "com.android.chrome"),
+    ("Google Play Store", "com.android.vending"),
+    ("YouTube", "com.google.android.youtube"),
+)
+
+
+PLACEHOLDER_PACKAGE = "mis. com.whatsapp"
 
 
 class Worker(QThread):
@@ -68,6 +81,7 @@ class MainWindow(QMainWindow):
         self.client = client
         self.store = ProfileStore()
         self.group_store = GroupStore()
+        self.prefs_store = SettingsStore()
 
         self.index: str | None = None
         self.device: dict = {}
@@ -82,6 +96,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MuMu Quick Tuner")
         self.resize(960, 780)
         self._build_ui()
+        self._load_app_prefs()
 
         QTimer.singleShot(50, self.refresh)
 
@@ -136,6 +151,50 @@ class MainWindow(QMainWindow):
         self.badge.setProperty("state", "off")
         device_layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(device_card)
+
+        # kartu aplikasi otomatis
+        app_card = QFrame()
+        app_card.setObjectName("card")
+        app_layout = QHBoxLayout(app_card)
+        app_layout.setContentsMargins(18, 12, 18, 12)
+        app_layout.setSpacing(10)
+
+        app_title = QLabel("Aplikasi")
+        app_title.setObjectName("cardTitle")
+        app_layout.addWidget(app_title)
+
+        self.app_combo = QComboBox()
+        self.app_combo.setEditable(True)
+        self.app_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.app_combo.setMinimumWidth(240)
+        self.app_combo.lineEdit().setPlaceholderText(PLACEHOLDER_PACKAGE)
+        for label, package in COMMON_APPS:
+            self.app_combo.addItem(package)
+            self.app_combo.setItemData(
+                self.app_combo.count() - 1,
+                f"{label} — {package}",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.app_combo.lineEdit().setToolTip(
+            "Nama paket aplikasi Android, mis. com.whatsapp"
+        )
+        app_layout.addWidget(self.app_combo, 1)
+
+        self.load_apps_button = QPushButton("Muat Daftar")
+        self.load_apps_button.clicked.connect(self._load_installed_apps)
+        app_layout.addWidget(self.load_apps_button)
+
+        self.auto_app_check = checkbox("Buka otomatis setelah menyala")
+        self.auto_app_check.toggled.connect(self._save_app_prefs)
+        app_layout.addWidget(self.auto_app_check)
+
+        self.launch_app_button = QPushButton("Nyalakan & Buka")
+        self.launch_app_button.clicked.connect(self._launch_and_open_app)
+        app_layout.addWidget(self.launch_app_button)
+
+        self.app_combo.lineEdit().editingFinished.connect(self._save_app_prefs)
+        self.app_combo.activated.connect(self._save_app_prefs)
+        layout.addWidget(app_card)
 
         # tab
         self.tabs = QTabWidget()
@@ -213,6 +272,7 @@ class MainWindow(QMainWindow):
             self.tabs,
         ):
             widget.setEnabled(not busy)
+        self._set_app_controls_enabled(self.index is not None and not busy)
         if message:
             self.status_label.setText(message)
             self.statusBar().showMessage(message)
@@ -273,6 +333,7 @@ class MainWindow(QMainWindow):
         self.profiles.reload()
         self.groups.set_devices(devices)
         self.groups.reload_presets()
+        self._set_app_controls_enabled(index is not None)
 
         self._set_busy(False, "Konfigurasi dimuat.")
         if index is None:
@@ -300,6 +361,133 @@ class MainWindow(QMainWindow):
         self.badge.setProperty("state", "ok" if running else "off")
         self.badge.style().unpolish(self.badge)
         self.badge.style().polish(self.badge)
+
+        self.launch_app_button.setText(
+            "Buka Aplikasi" if running else "Nyalakan & Buka"
+        )
+
+    # ------------------------------------------------------ aplikasi otomatis
+    def _set_app_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.app_combo,
+            self.load_apps_button,
+            self.auto_app_check,
+            self.launch_app_button,
+        ):
+            widget.setEnabled(enabled and not self._busy)
+
+    def _load_app_prefs(self) -> None:
+        prefs = self.prefs_store.load()
+        self.app_combo.setEditText(prefs.app_package)
+        self.auto_app_check.blockSignals(True)
+        self.auto_app_check.setChecked(prefs.auto_open_app)
+        self.auto_app_check.blockSignals(False)
+
+    def _save_app_prefs(self, *_args) -> None:
+        self.prefs_store.save(
+            AppPrefs(
+                app_package=self._app_package(),
+                auto_open_app=self.auto_app_check.isChecked(),
+            )
+        )
+
+    def _app_package(self) -> str:
+        return self.app_combo.currentText().strip()
+
+    def _auto_app_package(self) -> str:
+        """Paket yang harus dibuka otomatis, atau string kosong."""
+        if not self.auto_app_check.isChecked():
+            return ""
+        return self._app_package()
+
+    def _require_app_package(self) -> str:
+        package = self._app_package()
+        if not package:
+            QMessageBox.warning(
+                self,
+                "Aplikasi belum diisi",
+                "Isi nama paket aplikasi terlebih dahulu, "
+                "misalnya com.whatsapp.",
+            )
+        return package
+
+    def _load_installed_apps(self) -> None:
+        if self._busy or self.index is None:
+            return
+        if not self.info.get("is_android_started"):
+            QMessageBox.information(
+                self,
+                "Device belum siap",
+                "Nyalakan device dan tunggu Android siap sebelum "
+                "memuat daftar aplikasi.",
+            )
+            return
+
+        self._set_busy(True, "Membaca daftar aplikasi…")
+
+        def work():
+            return self.client.list_installed_apps(self.index)
+
+        def done(apps) -> None:
+            self._set_busy(False, "Daftar aplikasi dimuat.")
+            if not apps:
+                QMessageBox.information(
+                    self,
+                    "Tidak ada aplikasi",
+                    "Tidak ada aplikasi yang bisa dibaca dari device.",
+                )
+                return
+
+            current = self._app_package()
+            self.app_combo.blockSignals(True)
+            self.app_combo.clear()
+            for package, label in apps:
+                self.app_combo.addItem(package)
+                self.app_combo.setItemData(
+                    self.app_combo.count() - 1,
+                    f"{label} — {package}" if label and label != package else package,
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+            self.app_combo.blockSignals(False)
+            self.app_combo.setEditText(current)
+            self.statusBar().showMessage(
+                f"{len(apps)} aplikasi terpasang ditemukan."
+            )
+
+        self._run_async(work, done)
+
+    def _launch_and_open_app(self) -> None:
+        if self._busy or self.index is None:
+            return
+
+        package = self._require_app_package()
+        if not package:
+            return
+
+        self._save_app_prefs()
+        running = bool(self.info.get("is_process_started"))
+        status_text = (
+            f"Membuka {package}…"
+            if running
+            else "Menyalakan device & membuka aplikasi…"
+        )
+        self._set_busy(True, status_text)
+
+        index = self.index
+
+        def work():
+            if running:
+                self.client.launch_app(index, package)
+            else:
+                self.client.launch_device_and_app(index, package)
+            return package
+
+        def done(opened: str) -> None:
+            self._set_busy(False, f"{opened} dibuka.")
+            self.statusBar().showMessage(f"Aplikasi {opened} dibuka.")
+            QTimer.singleShot(2500, self.refresh)
+
+        self._run_async(work, done)
 
     # ---------------------------------------------------------- form utils
     def _collect_all(self) -> dict[str, str]:
@@ -449,6 +637,9 @@ class MainWindow(QMainWindow):
         preset = models.filter_managed(preset)
         self._last_batch = (group, preset_name, dict(preset), relaunch)
         self._last_failed = []
+        auto_package = self._auto_app_package()
+        if auto_package:
+            self._save_app_prefs()
 
         rows = list(targets) + [
             (ref.name, ref.index or "?") for ref in missing
@@ -553,6 +744,7 @@ class MainWindow(QMainWindow):
             results.extend(failures)
 
             if relaunch:
+                launched: list[tuple[str, str]] = []
                 for name, index in stopped:
                     emit(
                         {
@@ -565,6 +757,7 @@ class MainWindow(QMainWindow):
                     )
                     try:
                         self.client.control(index, "launch")
+                        launched.append((name, index))
                     except Exception as exc:  # noqa: BLE001
                         results.append(
                             BatchResult(
@@ -581,6 +774,39 @@ class MainWindow(QMainWindow):
                                 "status": "failed",
                             }
                         )
+
+                if auto_package:
+                    for name, index in launched:
+                        emit(
+                            {
+                                "name": name,
+                                "index": index,
+                                "phase": "app",
+                                "message": f"Menunggu Android & membuka {auto_package}…",
+                                "status": "",
+                            }
+                        )
+                        try:
+                            self.client.open_app_when_ready(
+                                index, auto_package, timeout=150
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            results.append(
+                                BatchResult(
+                                    name, index, "failed",
+                                    "Device menyala, tetapi aplikasi gagal "
+                                    f"dibuka: {exc}",
+                                )
+                            )
+                            emit(
+                                {
+                                    "name": name,
+                                    "index": index,
+                                    "phase": "error",
+                                    "message": f"Gagal membuka aplikasi: {exc}",
+                                    "status": "failed",
+                                }
+                            )
 
             return results, [name for name, _index in stopped]
 
@@ -809,12 +1035,31 @@ class MainWindow(QMainWindow):
 
         self._set_busy(True, "Memproses device…")
 
-        def work():
-            self.client.control(self.index, action)
-            return True
+        package = self._auto_app_package()
+        if package:
+            self._save_app_prefs()
+        index = self.index
 
-        def done(_):
-            self._set_busy(False, "Perintah dikirim.")
+        def work():
+            self.client.control(index, action)
+            if not package:
+                return ""
+
+            try:
+                self.client.open_app_when_ready(index, package, timeout=150)
+            except Exception as exc:  # noqa: BLE001 - device sudah menyala
+                return f"Device menyala, tetapi gagal membuka {package}: {exc}"
+            return ""
+
+        def done(note: str):
+            if note:
+                self._set_busy(False, "Perintah dikirim, aplikasi belum dibuka.")
+                QMessageBox.warning(self, "Aplikasi otomatis", note)
+            else:
+                message = "Perintah dikirim."
+                if package:
+                    message = f"Device menyala dan {package} dibuka."
+                self._set_busy(False, message)
             QTimer.singleShot(2500, self.refresh)
 
         self._run_async(work, done)

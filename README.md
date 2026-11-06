@@ -24,6 +24,11 @@ diterapkan.
   `%APPDATA%\mumu-quick-tuner\groups.json`.
 - **Preset bernama** — simpan setting dari form device aktif sebagai preset
   baru, lalu pakai ulang kapan saja dari tab Profil maupun tab Grup.
+- **Buka aplikasi otomatis** — isi nama paket Android (mis. `com.whatsapp`),
+  lalu gunakan **Nyalakan & Buka**, atau centang **Buka otomatis setelah
+  menyala** agar tombol Restart Device dan batch grup ikut membuka aplikasi
+  setelah Android siap. Daftar aplikasi terpasang bisa dimuat lewat tombol
+  **Muat Daftar**.
 - Backup otomatis config ke `backups/` sebelum setiap perubahan.
 - Deteksi device berjalan; karena MuMu hanya menerima perubahan setting saat
   device berhenti, aplikasi menawarkan **Matikan & Terapkan** lebih dulu.
@@ -81,6 +86,20 @@ Jika MuMu terpasang di folder lain, ubah `MUMU_MANAGER`.
    nyalakan lagi lewat tombol **Restart Device**.
 5. Gunakan tab **Profil** untuk menerapkan kombinasi setting sekaligus.
 
+## Membuka aplikasi otomatis
+
+1. Pada kartu **Aplikasi**, isi nama paket Android (mis. `com.whatsapp`) atau
+   pilih dari daftar bawaan. Tombol **Muat Daftar** menampilkan aplikasi yang
+   terpasang di device (device harus sudah menyala dan Android siap).
+2. Klik **Nyalakan & Buka** untuk menyalakan device lalu membuka aplikasi
+   setelah Android siap. Kalau device sudah berjalan, tombol berubah menjadi
+   **Buka Aplikasi** dan langsung membuka aplikasinya.
+3. Centang **Buka otomatis setelah menyala** agar tombol **Restart Device**
+   dan proses restart di batch grup juga membuka aplikasi yang sama.
+4. Pilihan paket dan checkbox disimpan di
+   `%APPDATA%\mumu-quick-tuner\settings.json`. Nilai awal juga bisa diberikan
+   lewat `.env` (`MUMU_AUTO_APP_PACKAGE`, `MUMU_AUTO_OPEN_APP`).
+
 ## Mengelola grup device
 
 1. Buka tab **Grup**. Semua device yang dibuat di MuMu akan terdeteksi
@@ -115,6 +134,7 @@ renderer, GPU, CPU/RAM).
 | Video memory | `renderer_strategy` (`auto` / `perf` / `dis`) |
 | GPU | `gpu_mode`, `gpu_model.custom`, `force_discrete_graphics` |
 | CPU/RAM | `performance_mode`, `performance_cpu.custom`, `performance_mem.custom` |
+| Buka aplikasi | `control -v <index> app launch --package <package>` |
 
 Catatan: opsi **GPU Usage Policy (Optimal)** hanya tersedia di GUI MuMu dan
 tidak diekspos oleh CLI, sehingga tidak diubah oleh aplikasi ini.
@@ -130,6 +150,7 @@ app/
   services/backup.py   # backup config sebelum apply
   services/profiles.py # preset & profil custom
   services/groups.py   # penyimpanan grup device
+  services/settings.py # preferensi aplikasi otomatis
   services/group_apply.py # eksekutor batch per device
   ui/main_window.py    # jendela, worker thread, alur apply & batch
   ui/sections.py       # tab Tampilan/Grafis/Performa/Profil

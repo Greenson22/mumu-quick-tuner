@@ -37,6 +37,7 @@ PHASE_LABELS = {
     "error": "Gagal",
     "skip": "Dilewati",
     "launch": "Menyalakan device",
+    "app": "Membuka aplikasi",
 }
 
 
