@@ -126,7 +126,12 @@ def _device_aspect(client, index: str) -> tuple[float, float]:
         if getter is not None:
             settings = getter(
                 index,
-                ["resolution_width.custom", "resolution_height.custom"],
+                [
+                    "resolution_width",
+                    "resolution_height",
+                    "resolution_width.custom",
+                    "resolution_height.custom",
+                ],
             )
         else:
             settings = client.get_settings(index)
@@ -134,8 +139,16 @@ def _device_aspect(client, index: str) -> tuple[float, float]:
         return DEFAULT_ASPECT
 
     try:
-        width = float(settings.get("resolution_width.custom", 0) or 0)
-        height = float(settings.get("resolution_height.custom", 0) or 0)
+        width = float(
+            settings.get("resolution_width")
+            or settings.get("resolution_width.custom")
+            or 0
+        )
+        height = float(
+            settings.get("resolution_height")
+            or settings.get("resolution_height.custom")
+            or 0
+        )
     except (AttributeError, TypeError, ValueError):
         return DEFAULT_ASPECT
     if width <= 0 or height <= 0:

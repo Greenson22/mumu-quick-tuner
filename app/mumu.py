@@ -224,18 +224,46 @@ class MuMuClient:
             "adb", "-v", str(index), "-c", command, timeout=timeout
         )
 
-    def get_screen_size(self, index: str) -> tuple[int, int] | None:
-        """Ambil resolusi aktif device dari `wm size`."""
-        text = self.adb_shell(index, "wm size", timeout=30)
-        override = re.findall(r"Override size:\s*(\d+)x(\d+)", text)
-        physical = re.findall(r"Physical size:\s*(\d+)x(\d+)", text)
-        match = override[-1] if override else (physical[-1] if physical else None)
-        if match is None:
-            return None
-        width, height = int(match[0]), int(match[1])
-        if width <= 0 or height <= 0:
-            return None
-        return width, height
+    def get_screen_size(self, index: str, timeout: int = 5) -> tuple[int, int] | None:
+        """Ambil resolusi aktif device dari `wm size` dengan fallback ke settings."""
+        try:
+            text = self.adb_shell(index, "wm size", timeout=timeout)
+            override = re.findall(r"Override size:\s*(\d+)x(\d+)", text)
+            physical = re.findall(r"Physical size:\s*(\d+)x(\d+)", text)
+            match = override[-1] if override else (physical[-1] if physical else None)
+            if match is not None:
+                width, height = int(match[0]), int(match[1])
+                if width > 0 and height > 0:
+                    return width, height
+        except Exception:
+            pass
+
+        # Fallback cepat dari settings jika adb wm size lambat/gagal
+        try:
+            keys = self.get_settings_keys(
+                index,
+                [
+                    "resolution_width",
+                    "resolution_height",
+                    "resolution_width.custom",
+                    "resolution_height.custom",
+                ],
+            )
+            w = float(
+                keys.get("resolution_width")
+                or keys.get("resolution_width.custom")
+                or 0
+            )
+            h = float(
+                keys.get("resolution_height")
+                or keys.get("resolution_height.custom")
+                or 0
+            )
+            if w > 0 and h > 0:
+                return int(round(w)), int(round(h))
+        except Exception:
+            pass
+        return None
 
     # --------------------------------------------------------------- queries
     def list_devices(self) -> dict[str, dict]:
