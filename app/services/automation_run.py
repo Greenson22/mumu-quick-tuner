@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import random
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -250,10 +253,11 @@ def _shutdown(client, index: str, wait: bool = True) -> None:
     try:
         client.control(index, "shutdown")
     except Exception:  # noqa: BLE001 - best effort
-        return
+        pass
+
     if wait:
         try:
-            client.wait_stopped(index, 30)
+            client.wait_stopped(index, 10)
         except Exception:  # noqa: BLE001 - best effort
             pass
 
@@ -373,34 +377,43 @@ def _run_device_session(
                 if config.interaction_loop and iteration > 1:
                     app_label += f" [putaran {iteration}]"
 
+                # Buka aplikasi HANYA satu kali per device (di awal atau jika belum pernah dibuka)
                 if app.package not in report.apps_opened:
                     report.apps_opened.append(app.package)
+                    _emit(
+                        progress,
+                        report,
+                        "app",
+                        f"Membuka {app_label}…",
+                        remaining_sec=_rem(),
+                    )
+                    try:
+                        client.launch_app(index, app.package)
+                    except Exception as exc:  # noqa: BLE001 - jangan gagalkan device, tetap lanjut
+                        report.script_errors.append(f"Gagal membuka {app.display_name}: {exc}")
 
-                _emit(
-                    progress,
-                    report,
-                    "app",
-                    f"Membuka {app_label}…",
-                    remaining_sec=_rem(),
-                )
-                try:
-                    client.launch_app(index, app.package)
-                except Exception as exc:  # noqa: BLE001 - jangan gagalkan device, tetap lanjut
-                    report.script_errors.append(f"Gagal membuka {app.display_name}: {exc}")
+                    if config.interaction_enabled and app.steps:
+                        # Beri waktu UI aplikasi muncul sebelum langkah pertama saat baru dibuka
+                        start_delay = float(getattr(config, "script_start_delay_sec", 2))
+                        if start_delay > 0:
+                            _emit(
+                                progress,
+                                report,
+                                "loading",
+                                f"Aplikasi dibuka, menunggu loading ({int(start_delay)}s)…",
+                                remaining_sec=_rem(),
+                            )
+                            _sleep_interruptibly(start_delay, sleep, should_stop)
+                elif config.interaction_loop and iteration > 1:
+                    _emit(
+                        progress,
+                        report,
+                        "loop",
+                        f"Interaksi {app_label}…",
+                        remaining_sec=_rem(),
+                    )
 
                 if config.interaction_enabled and app.steps:
-                    # Beri waktu UI aplikasi muncul sebelum langkah pertama.
-                    start_delay = float(getattr(config, "script_start_delay_sec", 2))
-                    if start_delay > 0:
-                        _emit(
-                            progress,
-                            report,
-                            "loading",
-                            f"Aplikasi dibuka, menunggu loading ({int(start_delay)}s)…",
-                            remaining_sec=_rem(),
-                        )
-                        _sleep_interruptibly(start_delay, sleep, should_stop)
-
                     for step_number, step in enumerate(app.steps, start=1):
                         if should_stop():
                             raise _Stopped()
@@ -427,6 +440,13 @@ def _run_device_session(
                         except Exception as exc:  # noqa: BLE001 - lanjut langkah lain
                             report.script_errors.append(
                                 f"{app.display_name} langkah {step_number}: {exc}"
+                            )
+                            _emit(
+                                progress,
+                                report,
+                                "script_error",
+                                f"Langkah {step_number} kendala: {exc}",
+                                remaining_sec=_rem(),
                             )
 
                 has_next = (position < app_count) or config.interaction_loop
@@ -507,13 +527,9 @@ def _final_shutdown(client, targets: list[tuple[str, str, dict]]) -> None:
     def stop_one(index: str) -> None:
         if not _is_running(client, index):
             return
-        try:
-            client.control(index, "shutdown")
-            client.wait_stopped(index, 30)
-        except Exception:  # noqa: BLE001
-            pass
+        _shutdown(client, index, wait=True)
 
-    with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(len(targets), 4))) as pool:
         list(pool.map(stop_one, [index for index, _name, _device in targets]))
 
 

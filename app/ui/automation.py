@@ -53,6 +53,8 @@ PHASE_LABELS = {
     "app": "Membuka aplikasi",
     "loading": "Menunggu loading",
     "script": "Interaksi",
+    "script_error": "Kendala skrip",
+    "loop": "Ulangi interaksi",
     "session": "Sesi berjalan",
     "shutdown": "Mematikan",
     "done": "Selesai",
@@ -1640,11 +1642,12 @@ class AutomationSection(ScrollSection):
             rem = int(payload["remaining_sec"])
             dur = int(payload.get("duration", 0))
             if dur > 0:
+                elapsed = max(0, dur - rem)
                 self.progress_table.item(row, 4).setText(
-                    f"{_duration_text(rem)} / {_duration_text(dur)}"
+                    f"{_duration_text(elapsed)} / {_duration_text(dur)}"
                 )
             else:
-                self.progress_table.item(row, 4).setText(_duration_text(rem))
+                self.progress_table.item(row, 4).setText(f"Sisa {_duration_text(rem)}")
         elif payload.get("duration"):
             self.progress_table.item(row, 4).setText(
                 _duration_text(int(payload["duration"]))

@@ -213,7 +213,7 @@ class MuMuClient:
 
         return stdout
 
-    def adb_shell(self, index: str, command: str, timeout: int = 60) -> str:
+    def adb_shell(self, index: str, command: str, timeout: int = 15) -> str:
         """Jalankan perintah shell Android lewat MuMuManager."""
         command = command.strip()
         if not command:
@@ -225,20 +225,8 @@ class MuMuClient:
         )
 
     def get_screen_size(self, index: str, timeout: int = 5) -> tuple[int, int] | None:
-        """Ambil resolusi aktif device dari `wm size` dengan fallback ke settings."""
-        try:
-            text = self.adb_shell(index, "wm size", timeout=timeout)
-            override = re.findall(r"Override size:\s*(\d+)x(\d+)", text)
-            physical = re.findall(r"Physical size:\s*(\d+)x(\d+)", text)
-            match = override[-1] if override else (physical[-1] if physical else None)
-            if match is not None:
-                width, height = int(match[0]), int(match[1])
-                if width > 0 and height > 0:
-                    return width, height
-        except Exception:
-            pass
-
-        # Fallback cepat dari settings jika adb wm size lambat/gagal
+        """Ambil resolusi aktif device (utamakan settings instan, fallback ke adb)."""
+        # Coba ambil langsung dari setting player secara instan tanpa menunggu adb
         try:
             keys = self.get_settings_keys(
                 index,
@@ -263,6 +251,20 @@ class MuMuClient:
                 return int(round(w)), int(round(h))
         except Exception:
             pass
+
+        # Fallback ke adb shell wm size jika settings tidak ada
+        try:
+            text = self.adb_shell(index, "wm size", timeout=timeout)
+            override = re.findall(r"Override size:\s*(\d+)x(\d+)", text)
+            physical = re.findall(r"Physical size:\s*(\d+)x(\d+)", text)
+            match = override[-1] if override else (physical[-1] if physical else None)
+            if match is not None:
+                width, height = int(match[0]), int(match[1])
+                if width > 0 and height > 0:
+                    return width, height
+        except Exception:
+            pass
+
         return None
 
     # --------------------------------------------------------------- queries

@@ -449,6 +449,40 @@ class RunAutomationTests(unittest.TestCase):
         self.assertIn("Jeda interaksi", gap_events[0].get("message", ""))
         self.assertIn("remaining_sec", gap_events[0])
 
+    def test_app_launched_only_once_in_interaction_loop(self) -> None:
+        client = FakeClient()
+        launched_apps = []
+
+        def mock_launch_app(index: str, package: str) -> None:
+            launched_apps.append((index, package))
+
+        client.launch_app = mock_launch_app
+
+        config = self._config(
+            app_count=1,
+            batch_size=1,
+            duration_min_sec=30,
+            duration_max_sec=30,
+            interaction_loop=True,
+            apps=[
+                AutomationApp(
+                    package="com.example.singlelaunch",
+                    steps=[ScriptStep(action="wait", delay_ms=10)],
+                )
+            ],
+        )
+        report = self._run(
+            client,
+            [("0", "device0", {"name": "device0"})],
+            config,
+        )
+
+        self.assertEqual(report.devices[0].status, "success")
+        # launch_app hanya boleh dipanggil 1 kali meskipun ada perulangan interaksi
+        self.assertEqual(len(launched_apps), 1)
+        self.assertEqual(launched_apps[0], ("0", "com.example.singlelaunch"))
+
+
     def test_remaining_sec_emitted_during_app_and_script(self) -> None:
         client = FakeClient()
         events = []
