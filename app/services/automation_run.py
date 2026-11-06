@@ -328,59 +328,94 @@ def _run_device_session(
                 screen = None
 
         session_start = clock()
+        deadline = session_start + report.duration_sec
         app_count = len(enabled_apps)
-        for position, app in enumerate(enabled_apps, start=1):
+
+        iteration = 1
+        while True:
             if should_stop():
                 raise _Stopped()
+            if iteration > 1 and clock() >= deadline:
+                break
 
-            _emit(
-                progress,
-                report,
-                "app",
-                f"Membuka {app.display_name} ({position}/{app_count})…",
-            )
-            try:
-                client.launch_app(index, app.package)
-                report.apps_opened.append(app.package)
-            except Exception as exc:  # noqa: BLE001 - jangan gagalkan device, tetap lanjut
-                report.script_errors.append(f"Gagal membuka {app.display_name}: {exc}")
-
-            if not config.interaction_enabled or not app.steps:
-                continue
-
-            # Beri waktu UI aplikasi muncul sebelum langkah pertama.
-            start_delay = float(getattr(config, "script_start_delay_sec", 2))
-            if start_delay > 0:
-                _sleep_interruptibly(start_delay, sleep, should_stop)
-
-            for step_number, step in enumerate(app.steps, start=1):
+            for position, app in enumerate(enabled_apps, start=1):
                 if should_stop():
                     raise _Stopped()
+                if iteration > 1 and clock() >= deadline:
+                    break
+
+                app_label = f"{app.display_name} ({position}/{app_count})"
+                if config.interaction_loop and iteration > 1:
+                    app_label += f" [putaran {iteration}]"
+
                 _emit(
                     progress,
                     report,
-                    "script",
-                    f"{app.display_name}: langkah {step_number}/"
-                    f"{len(app.steps)} — {step.describe()}",
+                    "app",
+                    f"Membuka {app_label}…",
                 )
                 try:
-                    _run_step(
-                        client,
-                        index,
-                        step,
-                        config,
-                        screen,
-                        sleep,
-                        should_stop,
-                    )
-                except _Stopped:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - lanjut langkah lain
-                    report.script_errors.append(
-                        f"{app.display_name} langkah {step_number}: {exc}"
-                    )
+                    client.launch_app(index, app.package)
+                    if app.package not in report.apps_opened:
+                        report.apps_opened.append(app.package)
+                except Exception as exc:  # noqa: BLE001 - jangan gagalkan device, tetap lanjut
+                    report.script_errors.append(f"Gagal membuka {app.display_name}: {exc}")
 
-        deadline = session_start + report.duration_sec
+                if config.interaction_enabled and app.steps:
+                    # Beri waktu UI aplikasi muncul sebelum langkah pertama.
+                    start_delay = float(getattr(config, "script_start_delay_sec", 2))
+                    if start_delay > 0:
+                        _sleep_interruptibly(start_delay, sleep, should_stop)
+
+                    for step_number, step in enumerate(app.steps, start=1):
+                        if should_stop():
+                            raise _Stopped()
+                        _emit(
+                            progress,
+                            report,
+                            "script",
+                            f"{app.display_name}: langkah {step_number}/"
+                            f"{len(app.steps)} — {step.describe()}",
+                        )
+                        try:
+                            _run_step(
+                                client,
+                                index,
+                                step,
+                                config,
+                                screen,
+                                sleep,
+                                should_stop,
+                            )
+                        except _Stopped:
+                            raise
+                        except Exception as exc:  # noqa: BLE001 - lanjut langkah lain
+                            report.script_errors.append(
+                                f"{app.display_name} langkah {step_number}: {exc}"
+                            )
+
+                has_next = (position < app_count) or config.interaction_loop
+                if config.interaction_enabled and has_next:
+                    gap_sec = config.choose_interaction_delay(rng)
+                    if gap_sec > 0:
+                        if iteration > 1:
+                            remaining_session = max(0.0, deadline - clock())
+                            sleep_gap = min(float(gap_sec), remaining_session)
+                        else:
+                            sleep_gap = float(gap_sec)
+
+                        if sleep_gap > 0:
+                            _emit(
+                                progress,
+                                report,
+                                "gap",
+                                f"Jeda interaksi {gap_sec} detik untuk {app.display_name}…",
+                            )
+                            _sleep_interruptibly(sleep_gap, sleep, should_stop)
+
+            if not config.interaction_loop:
+                break
+            iteration += 1
         last_countdown = -COUNTDOWN_EVERY_SECONDS
         while True:
             if should_stop():

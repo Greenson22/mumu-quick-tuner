@@ -24,6 +24,10 @@ DEFAULT_LOOP_COUNT = 1
 DEFAULT_LOOP_DELAY_SEC = 60
 DEFAULT_SCRIPT_START_DELAY_SEC = 2
 MAX_SCRIPT_START_DELAY_SEC = 300
+DEFAULT_INTERACTION_LOOP = False
+DEFAULT_INTERACTION_DELAY_MIN_SEC = 10
+DEFAULT_INTERACTION_DELAY_MAX_SEC = 20
+MAX_INTERACTION_DELAY_SEC = 3600
 
 STEP_ACTIONS = ("tap", "swipe", "wait", "key", "text")
 KEY_NAMES = {
@@ -207,6 +211,9 @@ class AutomationConfig:
     loop_count: int = DEFAULT_LOOP_COUNT
     loop_delay_sec: int = DEFAULT_LOOP_DELAY_SEC
     script_start_delay_sec: int = DEFAULT_SCRIPT_START_DELAY_SEC
+    interaction_loop: bool = DEFAULT_INTERACTION_LOOP
+    interaction_delay_min_sec: int = DEFAULT_INTERACTION_DELAY_MIN_SEC
+    interaction_delay_max_sec: int = DEFAULT_INTERACTION_DELAY_MAX_SEC
     apps: list[AutomationApp] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -217,6 +224,9 @@ class AutomationConfig:
             "duration_max_sec": self.duration_max_sec,
             "device_gap_sec": self.device_gap_sec,
             "interaction_enabled": self.interaction_enabled,
+            "interaction_loop": self.interaction_loop,
+            "interaction_delay_min_sec": self.interaction_delay_min_sec,
+            "interaction_delay_max_sec": self.interaction_delay_max_sec,
             "scale_coordinates": self.scale_coordinates,
             "arrange_windows": self.arrange_windows,
             "reference_resolution": [self.reference_width, self.reference_height],
@@ -266,6 +276,16 @@ class AutomationConfig:
             ),
         )
 
+        interaction_loop = bool(data.get("interaction_loop", DEFAULT_INTERACTION_LOOP))
+        delay_min = _to_int(
+            data.get("interaction_delay_min_sec"), DEFAULT_INTERACTION_DELAY_MIN_SEC
+        )
+        delay_min = max(0, min(MAX_INTERACTION_DELAY_SEC, delay_min))
+        delay_max = _to_int(
+            data.get("interaction_delay_max_sec"), DEFAULT_INTERACTION_DELAY_MAX_SEC
+        )
+        delay_max = max(0, min(MAX_INTERACTION_DELAY_SEC, delay_max))
+
         return cls(
             batch_size=max(1, _to_int(data.get("batch_size"), DEFAULT_BATCH_SIZE)),
             duration_min_sec=max(
@@ -276,6 +296,9 @@ class AutomationConfig:
             ),
             device_gap_sec=gap,
             interaction_enabled=bool(data.get("interaction_enabled", True)),
+            interaction_loop=interaction_loop,
+            interaction_delay_min_sec=delay_min,
+            interaction_delay_max_sec=delay_max,
             scale_coordinates=bool(data.get("scale_coordinates", True)),
             arrange_windows=bool(data.get("arrange_windows", True)),
             reference_width=max(1, width),
@@ -309,6 +332,12 @@ class AutomationConfig:
             return "Jeda antar pengulangan batch harus antara 0 dan 3600 detik."
         if not 0 <= self.script_start_delay_sec <= MAX_SCRIPT_START_DELAY_SEC:
             return f"Waktu mulai script harus antara 0 dan {MAX_SCRIPT_START_DELAY_SEC} detik."
+        if not (0 <= self.interaction_delay_min_sec <= MAX_INTERACTION_DELAY_SEC):
+            return f"Jeda interaksi minimum harus antara 0 dan {MAX_INTERACTION_DELAY_SEC} detik."
+        if not (0 <= self.interaction_delay_max_sec <= MAX_INTERACTION_DELAY_SEC):
+            return f"Jeda interaksi maksimum harus antara 0 dan {MAX_INTERACTION_DELAY_SEC} detik."
+        if self.interaction_delay_min_sec > self.interaction_delay_max_sec:
+            return "Jeda interaksi minimum tidak boleh lebih besar dari jeda interaksi maksimum."
         enabled = self.enabled_apps()
         if not enabled:
             return "Aktifkan minimal satu aplikasi otomatisasi."
@@ -332,6 +361,12 @@ class AutomationConfig:
         generator = rng or random
         low = min(self.duration_min_sec, self.duration_max_sec)
         high = max(self.duration_min_sec, self.duration_max_sec)
+        return generator.randint(low, high)
+
+    def choose_interaction_delay(self, rng: random.Random | None = None) -> int:
+        generator = rng or random
+        low = min(self.interaction_delay_min_sec, self.interaction_delay_max_sec)
+        high = max(self.interaction_delay_min_sec, self.interaction_delay_max_sec)
         return generator.randint(low, high)
 
 

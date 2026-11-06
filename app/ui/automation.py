@@ -1287,6 +1287,32 @@ class AutomationSection(ScrollSection):
         )
         card.add_row("Interaksi", self.interaction_check)
 
+        self.interaction_loop_check = checkbox(
+            "Ulangi interaksi terus-menerus selama durasi sesi (Loop)"
+        )
+        card.add_row("Loop interaksi", self.interaction_loop_check)
+
+        interaction_delay_holder = QWidget()
+        interaction_delay_row = QHBoxLayout(interaction_delay_holder)
+        interaction_delay_row.setContentsMargins(0, 0, 0, 0)
+        interaction_delay_row.setSpacing(8)
+        self.interaction_delay_min_spin = QSpinBox()
+        self.interaction_delay_min_spin.setRange(0, 3600)
+        self.interaction_delay_min_spin.setSuffix(" detik")
+        self.interaction_delay_max_spin = QSpinBox()
+        self.interaction_delay_max_spin.setRange(0, 3600)
+        self.interaction_delay_max_spin.setSuffix(" detik")
+        interaction_delay_row.addWidget(QLabel("Min"))
+        interaction_delay_row.addWidget(self.interaction_delay_min_spin)
+        interaction_delay_row.addWidget(QLabel("Maks"))
+        interaction_delay_row.addWidget(self.interaction_delay_max_spin)
+        interaction_delay_row.addStretch(1)
+        card.add_row(
+            "Jeda antar interaksi",
+            interaction_delay_holder,
+            "Rentang jeda acak antar interaksi/aplikasi agar setiap app memiliki jeda yang berbeda-beda.",
+        )
+
         self.script_start_delay_spin = QSpinBox()
         self.script_start_delay_spin.setRange(0, 300)
         self.script_start_delay_spin.setSuffix(" detik")
@@ -1344,15 +1370,29 @@ class AutomationSection(ScrollSection):
             self.loop_count_spin,
             self.loop_delay_spin,
             self.script_start_delay_spin,
+            self.interaction_delay_min_spin,
+            self.interaction_delay_max_spin,
         ):
             widget.valueChanged.connect(self._save_config)
         self.loop_mode_combo.currentIndexChanged.connect(self._on_loop_mode_changed)
         self.arrange_check.toggled.connect(self._save_config)
-        self.interaction_check.toggled.connect(self._save_config)
+        self.interaction_check.toggled.connect(self._on_interaction_toggled)
+        self.interaction_loop_check.toggled.connect(self._save_config)
         self.scale_check.toggled.connect(self._save_config)
         self.group_combo.currentIndexChanged.connect(self._sync_buttons)
         self.start_button.clicked.connect(self._start)
         self.stop_button.clicked.connect(self._stop)
+
+    def _on_interaction_toggled(self) -> None:
+        enabled = self.interaction_check.isChecked()
+        self.interaction_loop_check.setEnabled(enabled)
+        self.interaction_delay_min_spin.setEnabled(enabled)
+        self.interaction_delay_max_spin.setEnabled(enabled)
+        self.script_start_delay_spin.setEnabled(enabled)
+        self.scale_check.setEnabled(enabled)
+        self.ref_width.setEnabled(enabled)
+        self.ref_height.setEnabled(enabled)
+        self._save_config()
 
     def _on_loop_mode_changed(self) -> None:
         mode = str(self.loop_mode_combo.currentData())
@@ -1647,10 +1687,21 @@ class AutomationSection(ScrollSection):
             self.loop_delay_spin.setEnabled(self.config.loop_mode != "none")
             self.arrange_check.setChecked(self.config.arrange_windows)
             self.interaction_check.setChecked(self.config.interaction_enabled)
+            self.interaction_loop_check.setChecked(self.config.interaction_loop)
+            self.interaction_delay_min_spin.setValue(self.config.interaction_delay_min_sec)
+            self.interaction_delay_max_spin.setValue(self.config.interaction_delay_max_sec)
             self.scale_check.setChecked(self.config.scale_coordinates)
             self.ref_width.setValue(self.config.reference_width)
             self.ref_height.setValue(self.config.reference_height)
             self.script_start_delay_spin.setValue(self.config.script_start_delay_sec)
+            interact = self.config.interaction_enabled
+            self.interaction_loop_check.setEnabled(interact)
+            self.interaction_delay_min_spin.setEnabled(interact)
+            self.interaction_delay_max_spin.setEnabled(interact)
+            self.script_start_delay_spin.setEnabled(interact)
+            self.scale_check.setEnabled(interact)
+            self.ref_width.setEnabled(interact)
+            self.ref_height.setEnabled(interact)
         finally:
             self._loading = False
 
@@ -1666,6 +1717,9 @@ class AutomationSection(ScrollSection):
             script_start_delay_sec=self.script_start_delay_spin.value(),
             arrange_windows=self.arrange_check.isChecked(),
             interaction_enabled=self.interaction_check.isChecked(),
+            interaction_loop=self.interaction_loop_check.isChecked(),
+            interaction_delay_min_sec=self.interaction_delay_min_spin.value(),
+            interaction_delay_max_sec=self.interaction_delay_max_spin.value(),
             scale_coordinates=self.scale_check.isChecked(),
             reference_width=self.ref_width.value(),
             reference_height=self.ref_height.value(),

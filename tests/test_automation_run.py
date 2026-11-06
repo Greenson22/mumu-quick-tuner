@@ -385,6 +385,69 @@ class RunAutomationTests(unittest.TestCase):
         # Clock mencakup jeda antar siklus (minimal 15 detik)
         self.assertGreaterEqual(self.clock.now(), 15.0)
 
+    def test_interaction_loop_repeats_during_session(self) -> None:
+        client = FakeClient()
+        # Durasi sesi 50 detik, jeda interaksi 10 detik, loop interaksi aktif
+        config = self._config(
+            app_count=1,
+            batch_size=1,
+            duration_min_sec=50,
+            duration_max_sec=50,
+            interaction_loop=True,
+            interaction_delay_min_sec=10,
+            interaction_delay_max_sec=10,
+            script_start_delay_sec=1,
+            apps=[
+                AutomationApp(
+                    package="com.example.loopapp",
+                    steps=[ScriptStep(action="tap", x=10, y=20, delay_ms=100)],
+                )
+            ],
+        )
+        report = self._run(
+            client,
+            [("0", "device0", {"name": "device0"})],
+            config,
+        )
+        self.assertEqual(report.devices[0].status, "success")
+        adb_calls = [c[2] for c in client.calls if c[0] == "adb_shell"]
+        tap_calls = [cmd for cmd in adb_calls if "input tap" in cmd]
+        # Dalam durasi 50 detik dengan siklus ~11 detik, tap harus dijalankan beberapa kali (loop)
+        self.assertGreater(len(tap_calls), 2)
+
+    def test_interaction_delay_gap_emitted(self) -> None:
+        client = FakeClient()
+        events = []
+        config = self._config(
+            app_count=2,
+            batch_size=1,
+            duration_min_sec=30,
+            duration_max_sec=30,
+            interaction_loop=False,
+            interaction_delay_min_sec=5,
+            interaction_delay_max_sec=10,
+            script_start_delay_sec=1,
+            apps=[
+                AutomationApp(package="com.example.app1"),
+                AutomationApp(package="com.example.app2"),
+            ],
+        )
+        from app.services.automation_run import run_automation
+        run_automation(
+            client=client,
+            group_name="Grup Gap",
+            targets=_targets(1),
+            missing=[],
+            config=config,
+            report_dir=self.report_dir,
+            progress=events.append,
+            sleep=self.clock.sleep,
+            clock=self.clock.now,
+        )
+        gap_events = [e for e in events if e.get("phase") == "gap"]
+        self.assertTrue(len(gap_events) >= 1)
+        self.assertIn("Jeda interaksi", gap_events[0].get("message", ""))
+
     def test_run_single_script_test(self) -> None:
         from app.services.automation_run import run_single_script_test
 

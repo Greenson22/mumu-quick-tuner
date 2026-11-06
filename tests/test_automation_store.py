@@ -45,6 +45,9 @@ class AutomationStoreTests(unittest.TestCase):
             device_gap_sec=15,
             arrange_windows=True,
             interaction_enabled=True,
+            interaction_loop=True,
+            interaction_delay_min_sec=12,
+            interaction_delay_max_sec=25,
             reference_width=1280,
             reference_height=720,
             apps=[
@@ -76,6 +79,9 @@ class AutomationStoreTests(unittest.TestCase):
         self.assertEqual(loaded.duration_max_sec, 180)
         self.assertEqual(loaded.device_gap_sec, 15)
         self.assertTrue(loaded.arrange_windows)
+        self.assertTrue(loaded.interaction_loop)
+        self.assertEqual(loaded.interaction_delay_min_sec, 12)
+        self.assertEqual(loaded.interaction_delay_max_sec, 25)
         self.assertEqual(len(loaded.apps), 1)
         self.assertEqual(loaded.apps[0].package, "com.whatsapp")
         self.assertEqual(len(loaded.apps[0].steps), 4)
@@ -84,6 +90,9 @@ class AutomationStoreTests(unittest.TestCase):
 
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(raw["version"], 1)
+        self.assertEqual(raw["interaction_loop"], True)
+        self.assertEqual(raw["interaction_delay_min_sec"], 12)
+        self.assertEqual(raw["interaction_delay_max_sec"], 25)
         self.assertEqual(raw["reference_resolution"], [1280, 720])
 
     def test_seed_from_old_package(self) -> None:
@@ -104,6 +113,16 @@ class AutomationStoreTests(unittest.TestCase):
         rng = random.Random(1)
         values = [config.choose_duration(rng) for _ in range(200)]
         self.assertTrue(all(240 <= value <= 360 for value in values))
+        self.assertTrue(len(set(values)) > 1)
+
+    def test_choose_interaction_delay_within_range(self) -> None:
+        config = AutomationConfig(
+            interaction_delay_min_sec=10,
+            interaction_delay_max_sec=20,
+        )
+        rng = random.Random(42)
+        values = [config.choose_interaction_delay(rng) for _ in range(200)]
+        self.assertTrue(all(10 <= value <= 20 for value in values))
         self.assertTrue(len(set(values)) > 1)
 
     def test_report_round_trip(self) -> None:
@@ -183,6 +202,20 @@ class AutomationValidationTests(unittest.TestCase):
         self.assertIn("Jeda antar device", config.validation_error() or "")
         config.device_gap_sec = 9999
         self.assertIn("Jeda antar device", config.validation_error() or "")
+
+    def test_rejects_invalid_interaction_delay(self) -> None:
+        config = AutomationConfig(
+            interaction_delay_min_sec=30,
+            interaction_delay_max_sec=10,
+            apps=[AutomationApp(package="com.whatsapp")],
+        )
+        self.assertIn("tidak boleh lebih besar", config.validation_error() or "")
+
+        config = AutomationConfig(
+            interaction_delay_min_sec=-1,
+            apps=[AutomationApp(package="com.whatsapp")],
+        )
+        self.assertIn("Jeda interaksi", config.validation_error() or "")
 
     def test_valid_config(self) -> None:
         config = self._config(
