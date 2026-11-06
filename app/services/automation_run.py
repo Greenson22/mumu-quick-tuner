@@ -26,7 +26,7 @@ SleepCallback = Callable[[float], None]
 ClockCallback = Callable[[], float]
 
 IDLE_CHECK_SECONDS = 0.5
-COUNTDOWN_EVERY_SECONDS = 30.0
+COUNTDOWN_EVERY_SECONDS = 1.0
 APP_CHECK_ATTEMPTS = 3
 APP_CHECK_RETRY_SECONDS = 2.0
 
@@ -300,13 +300,6 @@ def _run_device_session(
         ]
         if missing:
             report.apps_missing = missing
-            report.message = (
-                "Aplikasi tidak terpasang: " + ", ".join(missing)
-                + ". Device dimatikan."
-            )
-            _emit(progress, report, "error", report.message, "failed")
-            report.status = "failed"
-            return report
 
         screen: tuple[int, int] | None = None
         if config.interaction_enabled and config.scale_coordinates:
@@ -327,8 +320,11 @@ def _run_device_session(
                 "app",
                 f"Membuka {app.display_name} ({position}/{app_count})…",
             )
-            client.launch_app(index, app.package)
-            report.apps_opened.append(app.package)
+            try:
+                client.launch_app(index, app.package)
+                report.apps_opened.append(app.package)
+            except Exception as exc:  # noqa: BLE001 - jangan gagalkan device, tetap lanjut
+                report.script_errors.append(f"Gagal membuka {app.display_name}: {exc}")
 
             if not config.interaction_enabled or not app.steps:
                 continue
@@ -368,7 +364,7 @@ def _run_device_session(
         while True:
             if should_stop():
                 raise _Stopped()
-            remaining = deadline - clock()
+            remaining = max(0.0, deadline - clock())
             if remaining <= 0:
                 break
             elapsed = report.duration_sec - remaining
@@ -380,8 +376,9 @@ def _run_device_session(
                     progress,
                     report,
                     "session",
-                    f"Sesi berjalan, sisa {minutes} menit {seconds} detik.",
+                    f"Sesi berjalan, sisa {minutes}m {seconds:02d}s",
                     duration=report.duration_sec,
+                    remaining_sec=int(remaining),
                 )
             sleep(min(IDLE_CHECK_SECONDS, remaining))
 
@@ -517,35 +514,41 @@ def run_automation(
             position, (index, name, device) = pos_item
             needs_launch = not device.get("is_process_started")
             if needs_launch and position > 0 and gap_sec > 0:
-                delay = position * gap_sec
-                if progress is not None:
-                    progress(
-                        {
-                            "name": name,
-                            "index": str(index),
-                            "batch": batch_number,
-                            "phase": "gap",
-                            "message": (
-                                f"Menunggu jeda {delay} detik sebelum "
-                                "menyalakan device…"
-                            ),
-                            "status": "",
-                        }
-                    )
-                try:
-                    _sleep_interruptibly(delay, sleep_fn, stop)
-                except _Stopped:
-                    rep = DeviceReport(
-                        name=name,
-                        index=str(index),
-                        batch=batch_number,
-                        status="stopped",
-                        message="Dihentikan oleh pengguna.",
-                        started_at=_now_iso(),
-                        finished_at=_now_iso(),
-                    )
-                    _emit(progress, rep, "stop", rep.message, "stopped")
-                    return rep
+                total_delay = position * gap_sec
+                gap_deadline = clock_fn() + total_delay
+                while True:
+                    if stop():
+                        rep = DeviceReport(
+                            name=name,
+                            index=str(index),
+                            batch=batch_number,
+                            status="stopped",
+                            message="Dihentikan oleh pengguna.",
+                            started_at=_now_iso(),
+                            finished_at=_now_iso(),
+                        )
+                        _emit(progress, rep, "stop", rep.message, "stopped")
+                        return rep
+                    remaining_gap = max(0.0, gap_deadline - clock_fn())
+                    if remaining_gap <= 0:
+                        break
+                    if progress is not None:
+                        progress(
+                            {
+                                "name": name,
+                                "index": str(index),
+                                "batch": batch_number,
+                                "phase": "gap",
+                                "message": (
+                                    f"Menunggu jeda {int(round(remaining_gap))} detik sebelum "
+                                    "menyalakan device…"
+                                ),
+                                "status": "",
+                                "remaining_sec": int(round(remaining_gap)),
+                            }
+                        )
+                    chunk = min(1.0, remaining_gap)
+                    sleep_fn(chunk)
 
             return _run_device_session(
                 client,

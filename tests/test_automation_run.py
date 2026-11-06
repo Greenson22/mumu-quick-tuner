@@ -155,7 +155,7 @@ class RunAutomationTests(unittest.TestCase):
         self.assertEqual(raw["group"], "Grup Tes")
         self.assertEqual(len(raw["devices"]), 7)
 
-    def test_missing_app_shuts_down_without_session(self) -> None:
+    def test_missing_app_continues_session_and_launches_app(self) -> None:
         client = FakeClient(
             installed={
                 "0": ["com.example.app0"],
@@ -171,14 +171,14 @@ class RunAutomationTests(unittest.TestCase):
 
         by_name = {device.name: device for device in report.devices}
         self.assertEqual(by_name["device0"].status, "success")
-        self.assertEqual(by_name["device1"].status, "failed")
+        self.assertEqual(by_name["device1"].status, "success")
         self.assertEqual(
             by_name["device1"].apps_missing, ["com.example.app0"]
         )
-        self.assertIn("tidak terpasang", by_name["device1"].message)
 
         app_launches = [call for call in client.calls if call[0] == "launch_app"]
-        self.assertTrue(all(call[1] == "0" for call in app_launches))
+        self.assertTrue(any(call[1] == "0" and call[2] == "com.example.app0" for call in app_launches))
+        self.assertTrue(any(call[1] == "1" and call[2] == "com.example.app0" for call in app_launches))
         self.assertIn(("control", "1", "shutdown"), client.calls)
 
     def test_apps_open_in_order_and_scripts_run(self) -> None:
@@ -312,6 +312,36 @@ class RunAutomationTests(unittest.TestCase):
         self.assertGreaterEqual(len(layout_calls), 2)
         indices_arranged = {call[1] for call in layout_calls}
         self.assertEqual(indices_arranged, {"0", "1"})
+
+    def test_device_emits_countdown_during_session(self) -> None:
+        client = FakeClient()
+        config = self._config(app_count=1, batch_size=1)
+        # 10 detik durasi
+        config.duration_min_sec = 10
+        config.duration_max_sec = 10
+        events = []
+
+        from app.services.automation_run import run_automation
+        run_automation(
+            client=client,
+            group_name="Grup Countdown",
+            targets=_targets(1),
+            missing=[],
+            config=config,
+            report_dir=self.report_dir,
+            progress=events.append,
+            sleep=self.clock.sleep,
+            clock=self.clock.now,
+        )
+
+        session_events = [
+            e for e in events
+            if e.get("phase") == "session" and "remaining_sec" in e
+        ]
+        self.assertGreater(len(session_events), 1)
+        remaining_values = [e["remaining_sec"] for e in session_events]
+        # Pastikan hitung mundur nilainya menurun
+        self.assertEqual(remaining_values, sorted(remaining_values, reverse=True))
 
 
 if __name__ == "__main__":

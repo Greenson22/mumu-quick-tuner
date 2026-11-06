@@ -884,16 +884,31 @@ class AutomationSection(ScrollSection):
 
         if payload.get("batch"):
             self.progress_table.item(row, 1).setText(str(payload["batch"]))
-        if payload.get("duration"):
+
+        phase = str(payload.get("phase", ""))
+        status = str(payload.get("status", ""))
+
+        if "remaining_sec" in payload and phase == "session":
+            rem = int(payload["remaining_sec"])
+            dur = int(payload.get("duration", 0))
+            if dur > 0:
+                self.progress_table.item(row, 4).setText(
+                    f"{_duration_text(rem)} / {_duration_text(dur)}"
+                )
+            else:
+                self.progress_table.item(row, 4).setText(_duration_text(rem))
+        elif "remaining_sec" in payload and phase == "gap":
+            rem = int(payload["remaining_sec"])
+            self.progress_table.item(row, 4).setText(f"Jeda {rem}s")
+        elif payload.get("duration"):
             self.progress_table.item(row, 4).setText(
                 _duration_text(int(payload["duration"]))
             )
+
         apps = payload.get("apps_opened")
         if isinstance(apps, list) and apps:
             self.progress_table.item(row, 3).setText(", ".join(apps))
 
-        phase = str(payload.get("phase", ""))
-        status = str(payload.get("status", ""))
         label = STATUS_LABELS.get(status) or PHASE_LABELS.get(phase, phase)
         self.progress_table.item(row, 2).setText(label)
         self.progress_table.item(row, 5).setText(
