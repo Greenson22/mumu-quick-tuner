@@ -47,6 +47,7 @@ class GroupsSection(ScrollSection):
     copyCurrentRequested = pyqtSignal(str)  # group
     savePresetRequested = pyqtSignal()
     retryRequested = pyqtSignal()
+    automationRequested = pyqtSignal(str)  # group
 
     def __init__(
         self,
@@ -133,6 +134,7 @@ class GroupsSection(ScrollSection):
         self.add_button = QPushButton("Tambah Pilihan")
         self.remove_button = QPushButton("Keluarkan Pilihan")
         self.rename_group_button = QPushButton("Ganti Nama…")
+        self.automation_button = QPushButton("Otomatisasi…")
         self.delete_group_button = QPushButton("Hapus")
         self.delete_group_button.setObjectName("danger")
 
@@ -141,6 +143,7 @@ class GroupsSection(ScrollSection):
             self.add_button,
             self.remove_button,
             self.rename_group_button,
+            self.automation_button,
             self.delete_group_button,
         ):
             buttons.addWidget(button)
@@ -154,6 +157,7 @@ class GroupsSection(ScrollSection):
         self.add_button.clicked.connect(self._add_to_group)
         self.remove_button.clicked.connect(self._remove_from_group)
         self.rename_group_button.clicked.connect(self._rename_group)
+        self.automation_button.clicked.connect(self._request_automation)
         self.delete_group_button.clicked.connect(self._delete_group)
 
     def _build_apply_card(self) -> None:
@@ -521,6 +525,7 @@ class GroupsSection(ScrollSection):
         self.add_button.setEnabled(group)
         self.remove_button.setEnabled(group)
         self.rename_group_button.setEnabled(group)
+        self.automation_button.setEnabled(group)
         self.delete_group_button.setEnabled(group)
         self.retry_button.setEnabled(self._retry_available)
 
@@ -537,6 +542,11 @@ class GroupsSection(ScrollSection):
         group = self.selected_group()
         if group:
             self.copyCurrentRequested.emit(group)
+
+    def _request_automation(self) -> None:
+        group = self.selected_group()
+        if group:
+            self.automationRequested.emit(group)
 
     def _load(self, settings: dict[str, str]) -> None:
         pass

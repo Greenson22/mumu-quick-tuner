@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -118,7 +119,7 @@ class MuMuClient:
         self.timeout = timeout
 
     # ------------------------------------------------------------------ core
-    def _run(self, *args: str, timeout: int | None = None) -> dict:
+    def _invoke(self, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess:
         if not self.manager.is_file():
             raise MuMuError(
                 "MuMuManager.exe tidak ditemukan:\n"
@@ -138,7 +139,7 @@ class MuMuClient:
             env.pop(key, None)
 
         try:
-            proc = subprocess.run(
+            return subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
@@ -154,6 +155,9 @@ class MuMuClient:
             ) from exc
         except OSError as exc:
             raise MuMuError(f"Gagal menjalankan MuMuManager: {exc}") from exc
+
+    def _run(self, *args: str, timeout: int | None = None) -> dict:
+        proc = self._invoke(*args, timeout=timeout)
 
         stdout = (proc.stdout or "").lstrip("\ufeff").strip()
         stderr = (proc.stderr or "").strip()
@@ -181,6 +185,54 @@ class MuMuClient:
             raise MuMuError(f"{message} (kode {code})")
 
         return data
+
+    def _run_plain(self, *args: str, timeout: int | None = None) -> str:
+        """Jalankan perintah yang output-nya teks biasa (mis. adb shell)."""
+        proc = self._invoke(*args, timeout=timeout)
+        stdout = (proc.stdout or "").lstrip("\ufeff").strip()
+        stderr = (proc.stderr or "").strip()
+
+        if stdout.startswith("{"):
+            try:
+                data = json.loads(stdout)
+            except json.JSONDecodeError:
+                data = None
+            if isinstance(data, dict) and "errcode" in data:
+                if data.get("errcode") not in (None, 0):
+                    message = data.get("errmsg") or "Perintah ADB gagal."
+                    raise MuMuError(str(message))
+                for key in ("data", "result", "output"):
+                    value = data.get(key)
+                    if isinstance(value, str):
+                        return value.strip()
+
+        if proc.returncode != 0 and not stdout:
+            detail = stderr or f"exit code {proc.returncode}"
+            raise MuMuError(f"Perintah MuMuManager gagal ({detail}).")
+
+        return stdout
+
+    def adb_shell(self, index: str, command: str, timeout: int = 60) -> str:
+        """Jalankan perintah shell Android lewat MuMuManager."""
+        command = command.strip()
+        if not command:
+            raise MuMuError("Perintah ADB masih kosong.")
+        return self._run_plain(
+            "adb", "-v", str(index), "-c", command, timeout=timeout
+        )
+
+    def get_screen_size(self, index: str) -> tuple[int, int] | None:
+        """Ambil resolusi aktif device dari `wm size`."""
+        text = self.adb_shell(index, "wm size", timeout=30)
+        override = re.findall(r"Override size:\s*(\d+)x(\d+)", text)
+        physical = re.findall(r"Physical size:\s*(\d+)x(\d+)", text)
+        match = override[-1] if override else (physical[-1] if physical else None)
+        if match is None:
+            return None
+        width, height = int(match[0]), int(match[1])
+        if width <= 0 or height <= 0:
+            return None
+        return width, height
 
     # --------------------------------------------------------------- queries
     def list_devices(self) -> dict[str, dict]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import sys
+import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
@@ -30,8 +31,11 @@ from app.mumu import MuMuClient, MuMuError, pick_device
 from app.services.backup import create_backup, resolve_vm_dir
 from app.services.group_apply import BatchResult, run_batch
 from app.services.groups import GroupStore
+from app.services.automation import AutomationStore
+from app.services.automation_run import run_automation
 from app.services.profiles import ProfileStore
 from app.services.settings import AppPrefs, SettingsStore
+from app.ui.automation import AutomationSection
 from app.ui.groups import GroupsSection
 from app.ui.sections import (
     GrafisSection,
@@ -74,6 +78,7 @@ class Worker(QThread):
 
 class MainWindow(QMainWindow):
     groupProgress = pyqtSignal(object)
+    automationProgress = pyqtSignal(object)
 
     def __init__(self, config: AppConfig, client: MuMuClient) -> None:
         super().__init__()
@@ -82,6 +87,10 @@ class MainWindow(QMainWindow):
         self.store = ProfileStore()
         self.group_store = GroupStore()
         self.prefs_store = SettingsStore()
+        self.automation_store = AutomationStore()
+        self.automation_store.seed_from_package(
+            self.prefs_store.load().app_package
+        )
 
         self.index: str | None = None
         self.device: dict = {}
@@ -92,6 +101,9 @@ class MainWindow(QMainWindow):
         self._workers: list[Worker] = []
         self._last_failed: list[tuple[str, str]] = []
         self._last_batch: tuple[str, str, dict[str, str], bool] | None = None
+        self._automation_running = False
+        self._automation_stop = threading.Event()
+        self._automation_group = ""
 
         self.setWindowTitle("MuMu Quick Tuner")
         self.resize(960, 780)
@@ -203,12 +215,14 @@ class MainWindow(QMainWindow):
         self.performa = PerformaSection()
         self.profiles = ProfilesSection(self.store)
         self.groups = GroupsSection(self.store, self.group_store)
+        self.automation = AutomationSection(self.group_store, self.automation_store)
 
         self.tabs.addTab(self.tampilan, "Tampilan")
         self.tabs.addTab(self.grafis, "Grafis")
         self.tabs.addTab(self.performa, "Performa")
         self.tabs.addTab(self.profiles, "Profil")
         self.tabs.addTab(self.groups, "Grup")
+        self.tabs.addTab(self.automation, "Otomatisasi")
         layout.addWidget(self.tabs, 1)
 
         self.profiles.loadRequested.connect(self._load_profile_into_form)
@@ -221,7 +235,13 @@ class MainWindow(QMainWindow):
         self.groups.copyCurrentRequested.connect(self._on_group_copy_current)
         self.groups.savePresetRequested.connect(self._save_preset_from_current)
         self.groups.retryRequested.connect(self._retry_failed)
+        self.groups.automationRequested.connect(self._open_automation_group)
         self.groupProgress.connect(self.groups.update_progress)
+
+        self.automation.startRequested.connect(self._start_automation)
+        self.automation.stopRequested.connect(self._stop_automation)
+        self.automation.loadAppsRequested.connect(self._load_automation_apps)
+        self.automationProgress.connect(self._on_automation_progress)
 
         # action bar
         actions = QHBoxLayout()
@@ -333,6 +353,7 @@ class MainWindow(QMainWindow):
         self.profiles.reload()
         self.groups.set_devices(devices)
         self.groups.reload_presets()
+        self.automation.reload_groups()
         self._set_app_controls_enabled(index is not None)
 
         self._set_busy(False, "Konfigurasi dimuat.")
@@ -912,6 +933,232 @@ class MainWindow(QMainWindow):
             self.groups.preset_combo.setCurrentIndex(index)
         self.statusBar().showMessage(f"Preset '{name}' disimpan.")
 
+    # ---------------------------------------------------------- otomatisasi
+    def _open_automation_group(self, group: str) -> None:
+        self.automation.reload_groups()
+        self.automation.select_group(group)
+        self.tabs.setCurrentWidget(self.automation)
+
+    def _automation_source_index(self, group: str) -> str | None:
+        if self.index is not None and self.info.get("is_android_started"):
+            return self.index
+        found, _missing = self.group_store.resolve(group, self.devices)
+        for index, _name, device in found:
+            if device.get("is_android_started"):
+                return index
+        return None
+
+    def _load_automation_apps(self, group: str) -> None:
+        if self._busy or self._automation_running:
+            return
+        source = self._automation_source_index(group)
+        if source is None:
+            QMessageBox.information(
+                self,
+                "Device belum siap",
+                "Nyalakan salah satu device di grup dan tunggu Android siap "
+                "sebelum memuat daftar aplikasi.",
+            )
+            return
+
+        self._set_busy(True, "Membaca daftar aplikasi device…")
+
+        def work():
+            return self.client.list_installed_apps(source)
+
+        def done(apps) -> None:
+            self._set_busy(False, "Daftar aplikasi dimuat.")
+            if not apps:
+                QMessageBox.information(
+                    self,
+                    "Tidak ada aplikasi",
+                    "Tidak ada aplikasi yang bisa dibaca dari device.",
+                )
+                return
+            self.automation.add_apps_from_list(apps)
+
+        self._run_async(work, done)
+
+    def _start_automation(self, group: str) -> None:
+        if self._busy or self._automation_running:
+            return
+
+        config = self.automation_store.load()
+        error = config.validation_error()
+        if error:
+            QMessageBox.warning(self, "Otomatisasi belum valid", error)
+            return
+
+        if not self.devices:
+            QMessageBox.warning(
+                self,
+                "Belum ada data device",
+                "Muat ulang daftar device terlebih dahulu.",
+            )
+            return
+
+        found, missing = self.group_store.resolve(group, self.devices)
+        if not found:
+            QMessageBox.warning(
+                self,
+                "Grup kosong",
+                f"Tidak ada device dari grup '{group}' yang terdeteksi.",
+            )
+            return
+
+        if not self._confirm_automation(group, found, missing, config):
+            return
+
+        rows = [(name, index) for index, name, _device in found]
+        missing_rows = [(ref.name, ref.index or "?") for ref in missing]
+        self.automation.start_progress(rows, missing_rows, config.batch_size)
+        self._automation_group = group
+        self._automation_stop.clear()
+        self._enter_automation_mode(group)
+
+        def work():
+            devices = self.client.list_devices()
+            live_found, live_missing = self.group_store.resolve(group, devices)
+            if not live_found:
+                raise MuMuError(
+                    f"Tidak ada device dari grup '{group}' yang terdeteksi."
+                )
+            return run_automation(
+                self.client,
+                group,
+                live_found,
+                live_missing,
+                config,
+                self.config.project_root / "logs",
+                progress=lambda payload: self.automationProgress.emit(payload),
+                should_stop=self._automation_stop.is_set,
+            )
+
+        self._run_async(
+            work,
+            self._on_automation_done,
+            self._on_automation_error,
+        )
+
+    def _confirm_automation(
+        self,
+        group: str,
+        found: list[tuple[str, str, dict]],
+        missing: list,
+        config,
+    ) -> bool:
+        apps = config.enabled_apps()
+        app_names = ", ".join(app.display_name for app in apps)
+        minutes_min = config.duration_min_sec / 60
+        minutes_max = config.duration_max_sec / 60
+        missing_note = ""
+        if missing:
+            missing_note = (
+                f"\n\n{len(missing)} anggota grup tidak ditemukan dan akan "
+                "dilewati."
+            )
+        text = (
+            f"Otomatisasi grup '{group}' akan dijalankan.\n\n"
+            f"• Device: {len(found)} ditemukan, batch {config.batch_size}\n"
+            f"• Durasi acak per device: {minutes_min:g}–{minutes_max:g} menit\n"
+            f"• Aplikasi: {app_names}\n"
+            f"• Interaksi otomatis: "
+            f"{'aktif' if config.interaction_enabled else 'nonaktif'}\n\n"
+            "Device akan dinyalakan dan dimatikan otomatis. Proses ini bisa "
+            "berlangsung lama. Lanjutkan?"
+            f"{missing_note}"
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Mulai Otomatisasi")
+        box.setText(text)
+        start = box.addButton("Mulai", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Batal", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is start
+
+    def _enter_automation_mode(self, group: str) -> None:
+        self._automation_running = True
+        self._busy = True
+        for widget in (
+            self.apply_button,
+            self.restart_button,
+            self.reset_button,
+            self.refresh_button,
+        ):
+            widget.setEnabled(False)
+        self._set_app_controls_enabled(False)
+        for index in range(self.tabs.count()):
+            self.tabs.setTabEnabled(
+                index, self.tabs.widget(index) is self.automation
+            )
+        self.tabs.setCurrentWidget(self.automation)
+        self.automation.set_running(True)
+        self.automation.set_status(
+            f"Otomatisasi grup '{group}' berjalan…"
+        )
+        self.status_label.setText(f"Otomatisasi grup '{group}' berjalan…")
+        self.statusBar().showMessage(
+            f"Otomatisasi grup '{group}' berjalan. Tekan Stop untuk berhenti."
+        )
+
+    def _leave_automation_mode(self) -> None:
+        self._automation_running = False
+        self._busy = False
+        for index in range(self.tabs.count()):
+            self.tabs.setTabEnabled(index, True)
+        for widget in (
+            self.apply_button,
+            self.restart_button,
+            self.reset_button,
+            self.refresh_button,
+        ):
+            widget.setEnabled(True)
+        self._set_app_controls_enabled(self.index is not None)
+        self.automation.set_running(False)
+
+    def _stop_automation(self) -> None:
+        if not self._automation_running:
+            return
+        self._automation_stop.set()
+        self.automation.set_status(
+            "Menghentikan… device aktif akan dimatikan."
+        )
+        self.statusBar().showMessage("Menghentikan otomatisasi…")
+
+    def _on_automation_progress(self, payload: dict) -> None:
+        self.automation.update_progress(payload)
+        name = str(payload.get("name", ""))
+        message = str(payload.get("message", ""))
+        if name:
+            self.status_label.setText(f"[Otomatisasi] {name}: {message}")
+            self.statusBar().showMessage(f"{name}: {message}")
+        else:
+            self.status_label.setText(message)
+            self.statusBar().showMessage(message)
+
+    def _on_automation_done(self, report) -> None:
+        self._leave_automation_mode()
+        self.automation.set_report_path(report.report_path)
+        self.automation.set_status(
+            "Otomatisasi selesai."
+            if not report.stopped_by_user
+            else "Otomatisasi dihentikan."
+        )
+        self.status_label.setText("Otomatisasi selesai.")
+        self.statusBar().showMessage(
+            f"Laporan otomatisasi: {report.report_path}"
+        )
+        QMessageBox.information(
+            self, "Otomatisasi selesai", report.summary_text()
+        )
+        self.refresh()
+
+    def _on_automation_error(self, message: str) -> None:
+        self._leave_automation_mode()
+        self.automation.set_status("Otomatisasi gagal.")
+        self._on_error(message)
+
     # --------------------------------------------------------------- apply
     def _apply_changes(self) -> None:
         if self._busy:
@@ -1150,6 +1397,27 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------------- close
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._automation_running:
+            answer = QMessageBox.question(
+                self,
+                "Otomatisasi masih berjalan",
+                "Hentikan otomatisasi, matikan device aktif, lalu tutup "
+                "aplikasi?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._automation_stop.set()
+            for worker in list(self._workers):
+                if not worker.wait(15000):
+                    QMessageBox.information(
+                        self,
+                        "Masih menghentikan device",
+                        "Device masih dimatikan. Tunggu beberapa saat lalu "
+                        "tutup aplikasi lagi.",
+                    )
+                    event.ignore()
+                    return
         for worker in list(self._workers):
             worker.wait(100)
         super().closeEvent(event)

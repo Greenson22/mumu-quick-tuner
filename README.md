@@ -29,6 +29,12 @@ diterapkan.
   menyala** agar tombol Restart Device dan batch grup ikut membuka aplikasi
   setelah Android siap. Daftar aplikasi terpasang bisa dimuat lewat tombol
   **Muat Daftar**.
+- **Otomatisasi grup** — pilih grup, atur jumlah device per batch (default 3),
+  daftar aplikasi global, durasi acak per device (mis. 4–6 menit), dan script
+  koordinat manual (tap/swipe/tunggu/tombol) per aplikasi. Device dinyalakan
+  paralel per batch, aplikasi dibuka, sesi berjalan, lalu device dimatikan dan
+  batch berikutnya dilanjutkan sampai seluruh grup selesai. Tersedia tombol
+  **Stop** dan laporan JSON.
 - Backup otomatis config ke `backups/` sebelum setiap perubahan.
 - Deteksi device berjalan; karena MuMu hanya menerima perubahan setting saat
   device berhenti, aplikasi menawarkan **Matikan & Terapkan** lebih dulu.
@@ -124,6 +130,49 @@ Nama device tidak pernah diubah: aplikasi tidak mengirim key `player_name`
 atau identitas HP, dan preset dibatasi ke 17 key yang dikelola (resolusi, FPS,
 renderer, GPU, CPU/RAM).
 
+## Otomatisasi grup
+
+Tab **Otomatisasi** menjalankan sesi otomatis untuk seluruh anggota grup:
+
+1. Pilih grup, jumlah device per batch (default 3), dan durasi acak per device
+   dalam menit (mis. min 4 dan maks 6).
+2. Isi **Aplikasi otomatisasi (global)**. Daftar ini dipakai semua grup. Paket
+   bisa ditambah manual atau diambil dari device yang sedang berjalan lewat
+   **Tambah dari Device…**.
+3. Untuk setiap aplikasi, klik **Edit Script…** bila ingin interaksi otomatis.
+   Langkah yang tersedia: **Tap**, **Swipe**, **Tunggu**, dan **Tombol**
+   (back/home/recent/enter). Contoh: tap sidebar `(60, 400)` → tunggu
+   `1000 ms` → tap halaman `(300, 200)`.
+4. Klik **Mulai Otomatisasi**. Aplikasi akan:
+   - menyalakan device per batch secara paralel;
+   - menunggu Android siap dan memeriksa apakah semua aplikasi aktif terpasang;
+   - mematikan device dan mencatatnya gagal jika ada aplikasi yang tidak
+     terpasang;
+   - membuka aplikasi berurutan lalu menjalankan script masing-masing;
+   - membiarkan device menyala sampai durasi acak habis;
+   - mematikan device, lalu lanjut ke batch berikutnya.
+5. Tekan **Stop** kapan saja untuk menghentikan sesi; device aktif dimatikan dan
+   batch berikutnya dilewati.
+6. Setelah selesai, semua device yang terlibat dimatikan dan laporan ditampilkan.
+   Laporan JSON disimpan di `logs/automation-YYYYMMDD-HHMMSS.json`.
+
+Konfigurasi otomatisasi disimpan di
+`%APPDATA%\mumu-quick-tuner\automation.json`. Jika daftar aplikasi masih kosong,
+paket dari pengaturan **Aplikasi** lama disalin otomatis.
+
+Koordinat script mengikuti **resolusi referensi** (default 1280×720). Jika opsi
+**Skalakan koordinat** aktif, koordinat disesuaikan ke resolusi masing-masing
+device. Nonaktifkan opsi tersebut bila script sudah memakai koordinat asli tiap
+device.
+
+Perintah interaksi memakai ADB bawaan MuMu:
+
+```text
+MuMuManager.exe adb -v <index> -c "input tap <x> <y>"
+MuMuManager.exe adb -v <index> -c "input swipe <x1> <y1> <x2> <y2> <durasi>"
+MuMuManager.exe adb -v <index> -c "input keyevent <kode>"
+```
+
 ## Pemetaan setting ke MuMuManager
 
 | Tab | Key CLI |
@@ -135,6 +184,7 @@ renderer, GPU, CPU/RAM).
 | GPU | `gpu_mode`, `gpu_model.custom`, `force_discrete_graphics` |
 | CPU/RAM | `performance_mode`, `performance_cpu.custom`, `performance_mem.custom` |
 | Buka aplikasi | `control -v <index> app launch --package <package>` |
+| Interaksi otomatis | `adb -v <index> -c "input tap/swipe/keyevent ..."` |
 
 Catatan: opsi **GPU Usage Policy (Optimal)** hanya tersedia di GUI MuMu dan
 tidak diekspos oleh CLI, sehingga tidak diubah oleh aplikasi ini.
@@ -152,10 +202,14 @@ app/
   services/groups.py   # penyimpanan grup device
   services/settings.py # preferensi aplikasi otomatis
   services/group_apply.py # eksekutor batch per device
+  services/automation.py # konfigurasi & laporan otomatisasi
+  services/automation_run.py # eksekutor sesi otomatisasi grup
   ui/main_window.py    # jendela, worker thread, alur apply & batch
   ui/sections.py       # tab Tampilan/Grafis/Performa/Profil
   ui/groups.py         # tab Grup
+  ui/automation.py     # tab Otomatisasi & editor script
   ui/widgets.py        # tema & komponen
+rancangan/             # dokumen rancangan fitur
 tests/                 # unit test tanpa kebutuhan MuMu/PyQt
 ```
 
