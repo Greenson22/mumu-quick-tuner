@@ -68,30 +68,172 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
 HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 
+def _get_exe_name(hwnd: int) -> str:
+    """Ambil nama file executable dari proses pemilik jendela."""
+    if sys.platform != "win32":
+        return ""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not handle:
+        return ""
+
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        size = wintypes.DWORD(512)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value.rsplit("\\", 1)[-1]
+    finally:
+        kernel32.CloseHandle(handle)
+    return ""
+
+
+def _get_window_class(hwnd: int) -> str:
+    """Ambil nama class jendela."""
+    if sys.platform != "win32":
+        return ""
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def _get_window_title(hwnd: int) -> str:
+    """Ambil judul jendela."""
+    if sys.platform != "win32":
+        return ""
+    user32 = ctypes.windll.user32
+    length = user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+
+_MUMU_EXE_KEYWORDS = (
+    "mumu", "nemu", "nemushell", "vkms",
+)
+
+_MUMU_TITLE_KEYWORDS = (
+    "mumu", "nemu",
+)
+
+_SELF_EXE_KEYWORDS = (
+    "python", "code.exe", "explorer.exe", "terminal",
+    "opencode", "cmd.exe", "powershell",
+)
+
+
+def _is_mumu_exe(exe_name: str) -> bool:
+    """Cek apakah nama executable berasal dari MuMu."""
+    lower = exe_name.lower()
+    return any(kw in lower for kw in _MUMU_EXE_KEYWORDS)
+
+
+def _is_mumu_title(title: str) -> bool:
+    """Cek apakah judul jendela mengandung kata kunci MuMu."""
+    lower = title.lower()
+    return any(kw in lower for kw in _MUMU_TITLE_KEYWORDS)
+
+
+def _is_self_window(exe_name: str, title: str) -> bool:
+    """Cek apakah jendela milik aplikasi kita sendiri atau tool lain."""
+    lower_exe = exe_name.lower()
+    lower_title = title.lower()
+    if any(kw in lower_exe for kw in _SELF_EXE_KEYWORDS):
+        return True
+    if "quick tuner" in lower_title:
+        return True
+    return False
+
+
 def find_mumu_windows() -> list[tuple[int, str]]:
-    """Cari jendela MuMu yang sedang berjalan di sistem."""
+    """Cari jendela MuMu yang sedang berjalan di sistem.
+
+    Menggunakan beberapa strategi:
+    1. Deteksi berdasarkan nama proses executable (MuMu*, Nemu*, vkms)
+    2. Deteksi berdasarkan judul jendela (mengandung 'mumu' / 'nemu')
+    3. Mengecualikan jendela aplikasi sendiri (Python, VS Code, Explorer, dll.)
+    """
     if sys.platform != "win32":
         return []
 
     user32 = ctypes.windll.user32
     results: list[tuple[int, str]] = []
+    seen_hwnds: set[int] = set()
 
     def enum_cb(hwnd, _lparam):
         if not user32.IsWindowVisible(hwnd):
             return True
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length > 0:
-            buff = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buff, length + 1)
-            title = buff.value
-            title_lower = title.lower()
-            if "mumu" in title_lower or "nemu" in title_lower:
-                results.append((hwnd, title))
+        if hwnd in seen_hwnds:
+            return True
+
+        title = _get_window_title(hwnd)
+        exe_name = _get_exe_name(hwnd)
+
+        if _is_self_window(exe_name, title):
+            return True
+
+        is_mumu = _is_mumu_exe(exe_name) or _is_mumu_title(title)
+        if is_mumu:
+            label = title if title else f"MuMu Window ({exe_name})"
+            results.append((hwnd, label))
+            seen_hwnds.add(hwnd)
+
         return True
 
     ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     user32.EnumWindows(ENUMPROC(enum_cb), 0)
     return results
+
+
+def get_window_at_point(screen_x: int, screen_y: int) -> tuple[int, str] | None:
+    """Ambil jendela top-level di posisi layar tertentu.
+
+    Menggunakan WindowFromPoint yang bisa mendeteksi jendela dari proses
+    elevated (Administrator) sekalipun, tidak seperti EnumWindows.
+    """
+    if sys.platform != "win32":
+        return None
+
+    user32 = ctypes.windll.user32
+    pt = POINT(screen_x, screen_y)
+    hwnd = user32.WindowFromPoint(pt)
+    if not hwnd:
+        return None
+
+    # Naik ke jendela top-level (root owner)
+    GA_ROOT = 2
+    root = user32.GetAncestor(hwnd, GA_ROOT)
+    if root:
+        hwnd = root
+
+    title = _get_window_title(hwnd)
+    exe_name = _get_exe_name(hwnd)
+
+    if _is_self_window(exe_name, title):
+        return None
+
+    label = title if title else f"Window ({exe_name or 'unknown'})"
+    return (hwnd, label)
+
+
+def pick_window_under_cursor() -> tuple[int, str] | None:
+    """Ambil jendela top-level di posisi kursor mouse saat ini."""
+    if sys.platform != "win32":
+        return None
+
+    user32 = ctypes.windll.user32
+    pt = POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return get_window_at_point(pt.x, pt.y)
 
 
 def get_window_client_rect(hwnd: int) -> tuple[int, int, int, int] | None:

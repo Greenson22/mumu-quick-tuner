@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -35,7 +35,7 @@ from app.services.automation import (
     ScriptStep,
     looks_like_package,
 )
-from app.services.recorder import ActionRecorder, find_mumu_windows
+from app.services.recorder import ActionRecorder, find_mumu_windows, pick_window_under_cursor
 from app.services.groups import GroupStore
 from app.ui.sections import ScrollSection
 from app.ui.widgets import Card, checkbox
@@ -275,21 +275,30 @@ class RecordDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Perekam Aksi Otomatis (Macro Recorder)")
-        self.resize(540, 420)
+        self.resize(600, 460)
         self.ref_width = ref_width
         self.ref_height = ref_height
 
         self.recorder: ActionRecorder | None = None
         self.recorded_steps: list[ScriptStep] = []
+        self._pick_countdown = 0
+        self._pick_timer: QTimer | None = None
 
         self.window_combo = QComboBox()
-        self.refresh_btn = QPushButton("Refresh Jendela")
+        self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._refresh_windows)
+        self.pick_btn = QPushButton("🎯 Pilih dengan Klik…")
+        self.pick_btn.setToolTip(
+            "Klik tombol ini, lalu klik pada jendela emulator MuMu dalam 5 detik.\n"
+            "Cara ini bisa mendeteksi jendela yang berjalan sebagai Administrator."
+        )
+        self.pick_btn.clicked.connect(self._start_pick)
 
         win_row = QHBoxLayout()
         win_row.addWidget(QLabel("Jendela Emulator:"))
         win_row.addWidget(self.window_combo, 1)
         win_row.addWidget(self.refresh_btn)
+        win_row.addWidget(self.pick_btn)
 
         self.start_btn = QPushButton("● Mulai Rekam")
         self.start_btn.setObjectName("primary")
@@ -303,8 +312,9 @@ class RecordDialog(QDialog):
         ctrl_row.addStretch(1)
 
         self.status_label = QLabel(
-            "Pilih jendela emulator acuan, lalu klik 'Mulai Rekam'. "
-            "Aksi klik, geser, dan ketik akan dicatat otomatis."
+            "Pilih jendela emulator acuan, lalu klik 'Mulai Rekam'.\n"
+            "Jika jendela tidak terdeteksi otomatis, gunakan tombol "
+            "'🎯 Pilih dengan Klik…' untuk memilih secara manual."
         )
         self.status_label.setObjectName("hint")
         self.status_label.setWordWrap(True)
@@ -352,16 +362,83 @@ class RecordDialog(QDialog):
             self.window_combo.addItem(f"{title} (HWND: {hwnd})", hwnd)
 
         if not windows:
-            self.window_combo.addItem("Tidak ada jendela MuMu terdeteksi", 0)
-            self.start_btn.setEnabled(False)
-        else:
+            self.window_combo.addItem(
+                "Tidak terdeteksi — gunakan '🎯 Pilih dengan Klik…'", 0
+            )
+        self.start_btn.setEnabled(bool(windows))
+
+    def _start_pick(self) -> None:
+        self._pick_countdown = 5
+        self.pick_btn.setEnabled(False)
+        self.refresh_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self.status_label.setText(
+            f"⏳ Klik pada jendela emulator MuMu dalam {self._pick_countdown} detik…"
+        )
+        self._pick_timer = QTimer(self)
+        self._pick_timer.setInterval(1000)
+        self._pick_timer.timeout.connect(self._pick_tick)
+        self._pick_timer.start()
+
+    def _pick_tick(self) -> None:
+        self._pick_countdown -= 1
+
+        result = pick_window_under_cursor()
+        if result is not None:
+            hwnd, title = result
+            # Jangan tangkap klik pada dialog kita sendiri
+            if hwnd != int(self.winId()):
+                parent_hwnd = 0
+                if self.parent() is not None:
+                    parent_hwnd = int(self.parent().winId())
+                if hwnd != parent_hwnd:
+                    self._finish_pick(hwnd, title)
+                    return
+
+        if self._pick_countdown <= 0:
+            self._finish_pick(0, "")
+            return
+
+        self.status_label.setText(
+            f"⏳ Klik pada jendela emulator MuMu dalam {self._pick_countdown} detik…"
+        )
+
+    def _finish_pick(self, hwnd: int, title: str) -> None:
+        if self._pick_timer:
+            self._pick_timer.stop()
+            self._pick_timer = None
+
+        self.pick_btn.setEnabled(True)
+        self.refresh_btn.setEnabled(True)
+
+        if hwnd:
+            label = f"{title} (HWND: {hwnd})" if title else f"Window (HWND: {hwnd})"
+            idx = self.window_combo.findData(hwnd)
+            if idx < 0:
+                self.window_combo.insertItem(0, label, hwnd)
+                self.window_combo.setCurrentIndex(0)
+            else:
+                self.window_combo.setCurrentIndex(idx)
             self.start_btn.setEnabled(True)
+            self.status_label.setText(
+                f"✅ Jendela berhasil dipilih: {label}\n"
+                "Klik 'Mulai Rekam' untuk mulai merekam aksi."
+            )
+        else:
+            self.start_btn.setEnabled(self.window_combo.currentData() not in (None, 0))
+            self.status_label.setText(
+                "⚠️ Tidak ada jendela yang terdeteksi. Coba lagi dengan "
+                "'🎯 Pilih dengan Klik…' dan klik tepat di jendela emulator."
+            )
 
     def _start_recording(self) -> None:
         hwnd = self.window_combo.currentData()
         if not hwnd:
             QMessageBox.warning(
-                self, "Jendela belum dipilih", "Pilih jendela emulator MuMu terlebih dahulu."
+                self, "Jendela belum dipilih",
+                "Pilih jendela emulator MuMu terlebih dahulu.\n\n"
+                "Jika jendela tidak muncul di daftar, gunakan tombol "
+                "'🎯 Pilih dengan Klik…' untuk memilih secara manual.",
             )
             return
 
@@ -370,6 +447,7 @@ class RecordDialog(QDialog):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.refresh_btn.setEnabled(False)
+        self.pick_btn.setEnabled(False)
         self.window_combo.setEnabled(False)
         if self.ok_button:
             self.ok_button.setEnabled(False)
@@ -396,6 +474,7 @@ class RecordDialog(QDialog):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.refresh_btn.setEnabled(True)
+        self.pick_btn.setEnabled(True)
         self.window_combo.setEnabled(True)
         if self.ok_button:
             self.ok_button.setEnabled(bool(self.recorded_steps))
@@ -421,6 +500,8 @@ class RecordDialog(QDialog):
         self.reject()
 
     def closeEvent(self, event) -> None:
+        if self._pick_timer:
+            self._pick_timer.stop()
         if self.recorder:
             self.recorder.stop()
             self.recorder = None
