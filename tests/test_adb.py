@@ -27,7 +27,7 @@ class AdbCommandTests(unittest.TestCase):
         client.adb_shell("2", "input tap 60 400")
         self.assertEqual(
             client.calls,
-            [(("adb", "-v", "2", "-c", "input tap 60 400"), 60)],
+            [(("adb", "-v", "2", "-c", "shell input tap 60 400"), 60)],
         )
 
     def test_adb_shell_rejects_empty_command(self) -> None:

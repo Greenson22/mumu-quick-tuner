@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -509,11 +510,51 @@ class RecordDialog(QDialog):
         super().closeEvent(event)
 
 
-class ScriptTestDialog(QDialog):
-    """Dialog untuk menguji coba langkah skrip langsung pada satu device."""
+class ScriptTestWorker(QThread):
+    """Worker QThread aman untuk menjalankan uji coba skrip tanpa membekukan antarmuka."""
 
     progressSignal = pyqtSignal(dict)
     finishedSignal = pyqtSignal(list)
+    failedSignal = pyqtSignal(str)
+
+    def __init__(
+        self,
+        client,
+        index: str,
+        steps: list[ScriptStep],
+        package: str,
+        config: AutomationConfig,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.client = client
+        self.index = index
+        self.steps = steps
+        self.package = package
+        self.config = config
+        self._stopped = False
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    def run(self) -> None:
+        try:
+            errs = run_single_script_test(
+                client=self.client,
+                index=self.index,
+                steps=self.steps,
+                package=self.package,
+                config=self.config,
+                progress=lambda p: self.progressSignal.emit(p),
+                should_stop=lambda: self._stopped,
+            )
+            self.finishedSignal.emit(errs)
+        except Exception as exc:  # noqa: BLE001
+            self.failedSignal.emit(str(exc))
+
+
+class ScriptTestDialog(QDialog):
+    """Dialog untuk menguji coba langkah skrip langsung pada satu device."""
 
     def __init__(
         self,
@@ -531,8 +572,8 @@ class ScriptTestDialog(QDialog):
         self.steps = list(steps)
         self.config = config or AutomationConfig()
 
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._worker: ScriptTestWorker | None = None
+        self._device_data: dict[str, dict] = {}
 
         self.device_combo = QComboBox()
         self.refresh_btn = QPushButton("Refresh Device")
@@ -591,25 +632,24 @@ class ScriptTestDialog(QDialog):
 
         self.start_btn.clicked.connect(self._start_test)
         self.stop_btn.clicked.connect(self._stop_test)
-        self.progressSignal.connect(self._on_progress)
-        self.finishedSignal.connect(self._on_finished)
 
         self._refresh_devices()
 
     def _refresh_devices(self) -> None:
         self.device_combo.clear()
+        self._device_data.clear()
         if not self.client:
             self.device_combo.addItem("Client tidak tersedia", "")
             self.start_btn.setEnabled(False)
             return
 
         try:
-            devices = self.client.list_devices()
+            self._device_data = self.client.list_devices()
         except Exception:
-            devices = {}
+            self._device_data = {}
 
         ready_count = 0
-        for index, dev in sorted(devices.items(), key=lambda x: str(x[0])):
+        for index, dev in sorted(self._device_data.items(), key=lambda x: str(x[0])):
             name = dev.get("name", f"Device {index}")
             is_ready = bool(dev.get("is_android_started"))
             status_text = " [Android Siap]" if is_ready else " [Mati / Belum Siap]"
@@ -619,7 +659,7 @@ class ScriptTestDialog(QDialog):
                 if ready_count == 1:
                     self.device_combo.setCurrentIndex(self.device_combo.count() - 1)
 
-        if not devices:
+        if not self._device_data:
             self.device_combo.addItem("Tidak ada device terdeteksi", "")
             self.start_btn.setEnabled(False)
         else:
@@ -635,7 +675,18 @@ class ScriptTestDialog(QDialog):
             QMessageBox.information(self, "Script Kosong", "Belum ada langkah script untuk diuji.")
             return
 
-        self._stop_event.clear()
+        # Cek apakah device sedang menyala
+        dev_info = self._device_data.get(index, {})
+        if not dev_info.get("is_android_started"):
+            QMessageBox.warning(
+                self,
+                "Device Belum Siap",
+                f"Device dengan index {index} belum menyala atau Android belum siap.\n\n"
+                "Silakan nyalakan device terlebih dahulu (misal lewat MuMu Player atau tab Grup) "
+                "sebelum menguji coba skrip.",
+            )
+            return
+
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.refresh_btn.setEnabled(False)
@@ -653,23 +704,22 @@ class ScriptTestDialog(QDialog):
 
         package_to_open = self.app.package if self.launch_app_check.isChecked() else ""
 
-        def worker():
-            errs = run_single_script_test(
-                client=self.client,
-                index=index,
-                steps=self.steps,
-                package=package_to_open,
-                config=cfg,
-                progress=lambda p: self.progressSignal.emit(p),
-                should_stop=self._stop_event.is_set,
-            )
-            self.finishedSignal.emit(errs)
-
-        self._thread = threading.Thread(target=worker, daemon=True)
-        self._thread.start()
+        self._worker = ScriptTestWorker(
+            client=self.client,
+            index=index,
+            steps=self.steps,
+            package=package_to_open,
+            config=cfg,
+            parent=self,
+        )
+        self._worker.progressSignal.connect(self._on_progress)
+        self._worker.finishedSignal.connect(self._on_finished)
+        self._worker.failedSignal.connect(self._on_failed)
+        self._worker.start()
 
     def _stop_test(self) -> None:
-        self._stop_event.set()
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
         self.status_label.setText("Menghentikan uji coba script…")
 
     def _on_progress(self, payload: dict) -> None:
@@ -690,14 +740,25 @@ class ScriptTestDialog(QDialog):
             err_summary = "\n• " + "\n• ".join(errors[:5])
             self.status_label.setText(f"Selesai dengan catatan:{err_summary}")
 
+    def _on_failed(self, error_message: str) -> None:
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.refresh_btn.setEnabled(True)
+        self.device_combo.setEnabled(True)
+        self.launch_app_check.setEnabled(True)
+        self.start_delay_spin.setEnabled(True)
+        self.status_label.setText(f"❌ Terjadi kesalahan saat uji coba: {error_message}")
+
     def _on_close(self) -> None:
-        if self._thread and self._thread.is_alive():
-            self._stop_event.set()
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
+            self._worker.wait(1500)
         self.reject()
 
     def closeEvent(self, event) -> None:
-        if self._thread and self._thread.is_alive():
-            self._stop_event.set()
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
+            self._worker.wait(1500)
         super().closeEvent(event)
 
 
@@ -745,32 +806,33 @@ class ScriptDialog(QDialog):
         self.table.doubleClicked.connect(lambda _index: self._edit())
 
         buttons = QHBoxLayout()
-        add_tap = QPushButton("+ Tap")
-        add_swipe = QPushButton("+ Swipe")
-        add_wait = QPushButton("+ Tunggu")
-        add_key = QPushButton("+ Tombol")
-        add_text = QPushButton("+ Teks")
+
         record_btn = QPushButton("● Rekam Aksi…")
         record_btn.setObjectName("primary")
         test_btn = QPushButton("▶ Uji di Device…")
+
+        add_menu_btn = QPushButton("+ Tambah Manual ▾")
+        add_menu = QMenu(add_menu_btn)
+        add_menu.addAction("👆 + Tap (Klik)").triggered.connect(lambda: self._add("tap"))
+        add_menu.addAction("↔️ + Swipe (Geser)").triggered.connect(lambda: self._add("swipe"))
+        add_menu.addAction("⏳ + Tunggu (Delay)").triggered.connect(lambda: self._add("wait"))
+        add_menu.addAction("⌨️ + Ketik Teks").triggered.connect(lambda: self._add("text"))
+        add_menu.addAction("🔲 + Tombol (Back/Home/dll)").triggered.connect(lambda: self._add("key"))
+        add_menu_btn.setMenu(add_menu)
+
         edit = QPushButton("Ubah…")
         remove = QPushButton("Hapus")
-        up = QPushButton("Naik")
-        down = QPushButton("Turun")
-        for button in (
-            add_tap,
-            add_swipe,
-            add_wait,
-            add_key,
-            add_text,
-            record_btn,
-            test_btn,
-            edit,
-            remove,
-            up,
-            down,
-        ):
-            buttons.addWidget(button)
+        up = QPushButton("↑ Naik")
+        down = QPushButton("↓ Turun")
+
+        buttons.addWidget(record_btn)
+        buttons.addWidget(test_btn)
+        buttons.addWidget(add_menu_btn)
+        buttons.addSpacing(16)
+        buttons.addWidget(edit)
+        buttons.addWidget(remove)
+        buttons.addWidget(up)
+        buttons.addWidget(down)
         buttons.addStretch(1)
 
         note = QLabel(
@@ -795,11 +857,6 @@ class ScriptDialog(QDialog):
         layout.addWidget(note)
         layout.addWidget(box)
 
-        add_tap.clicked.connect(lambda: self._add("tap"))
-        add_swipe.clicked.connect(lambda: self._add("swipe"))
-        add_wait.clicked.connect(lambda: self._add("wait"))
-        add_key.clicked.connect(lambda: self._add("key"))
-        add_text.clicked.connect(lambda: self._add("text"))
         record_btn.clicked.connect(self._record)
         test_btn.clicked.connect(self._test_script)
         edit.clicked.connect(self._edit)

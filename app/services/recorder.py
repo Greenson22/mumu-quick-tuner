@@ -406,6 +406,7 @@ class ActionRecorder:
                         action="tap",
                         x=self._drag_start_point[0],
                         y=self._drag_start_point[1],
+                        duration_ms=duration_ms,
                         delay_ms=delay_ms,
                     )
                 else:

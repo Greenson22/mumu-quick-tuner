@@ -217,6 +217,8 @@ class MuMuClient:
         command = command.strip()
         if not command:
             raise MuMuError("Perintah ADB masih kosong.")
+        if not command.startswith("shell "):
+            command = f"shell {command}"
         return self._run_plain(
             "adb", "-v", str(index), "-c", command, timeout=timeout
         )
