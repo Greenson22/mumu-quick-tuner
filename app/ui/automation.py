@@ -40,7 +40,9 @@ from app.ui.widgets import Card, checkbox
 
 PHASE_LABELS = {
     "batch": "Batch",
+    "gap": "Menunggu jeda",
     "launch": "Menyalakan",
+    "arrange": "Menata jendela",
     "wait": "Menunggu Android",
     "duration": "Durasi",
     "check": "Memeriksa aplikasi",
@@ -564,6 +566,21 @@ class AutomationSection(ScrollSection):
         self.batch_spin.setSuffix(" device")
         card.add_row("Device per batch", self.batch_spin)
 
+        self.gap_spin = QSpinBox()
+        self.gap_spin.setRange(0, 600)
+        self.gap_spin.setSuffix(" detik")
+        card.add_row(
+            "Jeda antar device",
+            self.gap_spin,
+            "Jeda saat menyalakan device berikutnya dalam satu batch. "
+            "Default 30 detik.",
+        )
+
+        self.arrange_check = checkbox(
+            "Susun jendela device otomatis (tidak tumpang tindih)"
+        )
+        card.add_row("Posisi jendela", self.arrange_check)
+
         duration_holder = QWidget()
         duration_row = QHBoxLayout(duration_holder)
         duration_row.setContentsMargins(0, 0, 0, 0)
@@ -629,12 +646,14 @@ class AutomationSection(ScrollSection):
 
         for widget in (
             self.batch_spin,
+            self.gap_spin,
             self.minutes_min,
             self.minutes_max,
             self.ref_width,
             self.ref_height,
         ):
             widget.valueChanged.connect(self._save_config)
+        self.arrange_check.toggled.connect(self._save_config)
         self.interaction_check.toggled.connect(self._save_config)
         self.scale_check.toggled.connect(self._save_config)
         self.group_combo.currentIndexChanged.connect(self._sync_buttons)
@@ -787,8 +806,10 @@ class AutomationSection(ScrollSection):
         for widget in (
             self.group_combo,
             self.batch_spin,
+            self.gap_spin,
             self.minutes_min,
             self.minutes_max,
+            self.arrange_check,
             self.interaction_check,
             self.scale_check,
             self.ref_width,
@@ -896,8 +917,10 @@ class AutomationSection(ScrollSection):
         self._loading = True
         try:
             self.batch_spin.setValue(self.config.batch_size)
+            self.gap_spin.setValue(self.config.device_gap_sec)
             self.minutes_min.setValue(self.config.duration_min_sec / 60)
             self.minutes_max.setValue(self.config.duration_max_sec / 60)
+            self.arrange_check.setChecked(self.config.arrange_windows)
             self.interaction_check.setChecked(self.config.interaction_enabled)
             self.scale_check.setChecked(self.config.scale_coordinates)
             self.ref_width.setValue(self.config.reference_width)
@@ -910,6 +933,8 @@ class AutomationSection(ScrollSection):
             batch_size=self.batch_spin.value(),
             duration_min_sec=max(1, int(round(self.minutes_min.value() * 60))),
             duration_max_sec=max(1, int(round(self.minutes_max.value() * 60))),
+            device_gap_sec=self.gap_spin.value(),
+            arrange_windows=self.arrange_check.isChecked(),
             interaction_enabled=self.interaction_check.isChecked(),
             scale_coordinates=self.scale_check.isChecked(),
             reference_width=self.ref_width.value(),

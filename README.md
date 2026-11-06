@@ -136,24 +136,30 @@ Tab **Otomatisasi** menjalankan sesi otomatis untuk seluruh anggota grup:
 
 1. Pilih grup, jumlah device per batch (default 3), dan durasi acak per device
    dalam menit (mis. min 4 dan maks 6).
-2. Isi **Aplikasi otomatisasi (global)**. Daftar ini dipakai semua grup. Paket
+2. Tentukan **Jeda antar device** (default 30 detik) saat menyalakan device
+   berikutnya dalam satu batch agar beban sistem bertahap.
+3. Biarkan opsi **Susun jendela device otomatis** aktif agar jendela disusun rapi
+   mulai dari sudut kiri atas layar tanpa saling menimpa.
+4. Isi **Aplikasi otomatisasi (global)**. Daftar ini dipakai semua grup. Paket
    bisa ditambah manual atau diambil dari device yang sedang berjalan lewat
    **Tambah dari Device…**.
-3. Untuk setiap aplikasi, klik **Edit Script…** bila ingin interaksi otomatis.
+5. Untuk setiap aplikasi, klik **Edit Script…** bila ingin interaksi otomatis.
    Langkah yang tersedia: **Tap**, **Swipe**, **Tunggu**, dan **Tombol**
    (back/home/recent/enter). Contoh: tap sidebar `(60, 400)` → tunggu
    `1000 ms` → tap halaman `(300, 200)`.
-4. Klik **Mulai Otomatisasi**. Aplikasi akan:
-   - menyalakan device per batch secara paralel;
-   - menunggu Android siap dan memeriksa apakah semua aplikasi aktif terpasang;
+6. Klik **Mulai Otomatisasi**. Aplikasi akan:
+   - menyalakan device per batch secara berurutan dengan jeda antar device;
+   - menata posisi jendela di layar agar tidak tumpang tindih;
+   - menunggu Android siap dan memeriksa apakah semua aplikasi aktif terpasang
+     (dilengkapi percobaan ulang otomatis jika service baru boot);
    - mematikan device dan mencatatnya gagal jika ada aplikasi yang tidak
      terpasang;
    - membuka aplikasi berurutan lalu menjalankan script masing-masing;
    - membiarkan device menyala sampai durasi acak habis;
    - mematikan device, lalu lanjut ke batch berikutnya.
-5. Tekan **Stop** kapan saja untuk menghentikan sesi; device aktif dimatikan dan
+7. Tekan **Stop** kapan saja untuk menghentikan sesi; device aktif dimatikan dan
    batch berikutnya dilewati.
-6. Setelah selesai, semua device yang terlibat dimatikan dan laporan ditampilkan.
+8. Setelah selesai, semua device yang terlibat dimatikan dan laporan ditampilkan.
    Laporan JSON disimpan di `logs/automation-YYYYMMDD-HHMMSS.json`.
 
 Konfigurasi otomatisasi disimpan di
@@ -184,6 +190,7 @@ MuMuManager.exe adb -v <index> -c "input keyevent <kode>"
 | GPU | `gpu_mode`, `gpu_model.custom`, `force_discrete_graphics` |
 | CPU/RAM | `performance_mode`, `performance_cpu.custom`, `performance_mem.custom` |
 | Buka aplikasi | `control -v <index> app launch --package <package>` |
+| Tata letak jendela | `control -v <index> layout_window -px <x> -py <y> -sw <w> -sh <h>` |
 | Interaksi otomatis | `adb -v <index> -c "input tap/swipe/keyevent ..."` |
 
 Catatan: opsi **GPU Usage Policy (Optimal)** hanya tersedia di GUI MuMu dan

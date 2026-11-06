@@ -259,6 +259,19 @@ class MuMuClient:
             args += ["-k", key]
         return self._run(*args)
 
+    def get_settings_keys(self, index: str, keys: list[str]) -> dict[str, str]:
+        """Baca nilai beberapa key setting tanpa memuat seluruh konfigurasi."""
+        if not keys:
+            return {}
+        args = ["setting", "-v", str(index)]
+        for key in keys:
+            args += ["-k", key]
+        data = self._run(*args)
+        return {
+            str(key): ("" if value is None else str(value))
+            for key, value in data.items()
+        }
+
     # --------------------------------------------------------------- actions
     def apply(self, index: str, changes: dict[str, str]) -> None:
         if not changes:
@@ -271,6 +284,30 @@ class MuMuClient:
 
     def control(self, index: str, action: str) -> None:
         self._run("control", "-v", str(index), action)
+
+    def layout_window(
+        self,
+        index: str,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
+        """Atur posisi dan ukuran jendela player di layar."""
+        self._run(
+            "control",
+            "-v",
+            str(index),
+            "layout_window",
+            "-px",
+            str(int(x)),
+            "-py",
+            str(int(y)),
+            "-sw",
+            str(max(1, int(width))),
+            "-sh",
+            str(max(1, int(height))),
+        )
 
     def launch_app(self, index: str, package: str) -> None:
         package = package.strip()

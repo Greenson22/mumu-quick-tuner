@@ -18,6 +18,7 @@ from app.services.automation import (
     write_report,
 )
 from app.services.groups import DeviceRef
+from app.services.window_layout import DEFAULT_ASPECT, plan_window_rects
 
 ProgressCallback = Callable[[dict], None]
 StopCallback = Callable[[], bool]
@@ -26,6 +27,8 @@ ClockCallback = Callable[[], float]
 
 IDLE_CHECK_SECONDS = 0.5
 COUNTDOWN_EVERY_SECONDS = 30.0
+APP_CHECK_ATTEMPTS = 3
+APP_CHECK_RETRY_SECONDS = 2.0
 
 
 class _Stopped(Exception):
@@ -116,6 +119,65 @@ def _wait_android_started(
     return False
 
 
+def _device_aspect(client, index: str) -> tuple[float, float]:
+    """Rasio resolusi device untuk menghitung ukuran jendela."""
+    try:
+        getter = getattr(client, "get_settings_keys", None)
+        if getter is not None:
+            settings = getter(
+                index,
+                ["resolution_width.custom", "resolution_height.custom"],
+            )
+        else:
+            settings = client.get_settings(index)
+    except Exception:  # noqa: BLE001 - pakai rasio default
+        return DEFAULT_ASPECT
+
+    try:
+        width = float(settings.get("resolution_width.custom", 0) or 0)
+        height = float(settings.get("resolution_height.custom", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_ASPECT
+    if width <= 0 or height <= 0:
+        return DEFAULT_ASPECT
+    return width, height
+
+
+def _apply_layout(client, index: str, rect: tuple[int, int, int, int] | None) -> bool:
+    if rect is None:
+        return False
+    layout = getattr(client, "layout_window", None)
+    if layout is None:
+        return False
+    try:
+        layout(index, *rect)
+    except Exception:  # noqa: BLE001 - penataan bersifat opsional
+        return False
+    return True
+
+
+def _installed_packages(
+    client,
+    index: str,
+    sleep: SleepCallback,
+    should_stop: StopCallback,
+) -> set[str]:
+    """Baca paket terpasang dengan beberapa percobaan saat device baru siap."""
+    packages: set[str] = set()
+    for attempt in range(1, APP_CHECK_ATTEMPTS + 1):
+        try:
+            packages = {
+                package for package, _label in client.list_installed_apps(index)
+            }
+        except Exception:  # noqa: BLE001 - coba lagi
+            packages = set()
+        if packages:
+            return packages
+        if attempt < APP_CHECK_ATTEMPTS:
+            _sleep_interruptibly(APP_CHECK_RETRY_SECONDS, sleep, should_stop)
+    return packages
+
+
 def _run_step(
     client,
     index: str,
@@ -184,6 +246,7 @@ def _run_device_session(
     sleep: SleepCallback,
     clock: ClockCallback,
     rng: random.Random,
+    window_rect: tuple[int, int, int, int] | None = None,
 ) -> DeviceReport:
     report = DeviceReport(
         name=name,
@@ -200,8 +263,11 @@ def _run_device_session(
         if not device.get("is_process_started"):
             _emit(progress, report, "launch", "Menyalakan device…")
             client.control(index, "launch")
+            if _apply_layout(client, index, window_rect):
+                _emit(progress, report, "arrange", "Menata jendela device…")
         else:
             _emit(progress, report, "launch", "Device sudah berjalan.")
+            _apply_layout(client, index, window_rect)
 
         _emit(progress, report, "wait", "Menunggu Android siap…")
         if not _wait_android_started(
@@ -210,6 +276,9 @@ def _run_device_session(
             report.message = "Android tidak siap dalam 150 detik."
             _emit(progress, report, "error", report.message, "failed")
             return report
+
+        # Ulangi penataan setelah jendela player benar-benar tampil.
+        _apply_layout(client, index, window_rect)
 
         if should_stop():
             raise _Stopped()
@@ -225,9 +294,7 @@ def _run_device_session(
 
         enabled_apps = config.enabled_apps()
         _emit(progress, report, "check", "Memeriksa aplikasi terpasang…")
-        installed = {
-            package for package, _label in client.list_installed_apps(index)
-        }
+        installed = _installed_packages(client, index, sleep, should_stop)
         missing = [
             app.package for app in enabled_apps if app.package not in installed
         ]
@@ -373,6 +440,7 @@ def run_automation(
     sleep: SleepCallback | None = None,
     clock: ClockCallback | None = None,
     rng: random.Random | None = None,
+    screen_rect: tuple[int, int, int, int] | None = None,
 ) -> AutomationReport:
     """Jalankan sesi otomatisasi untuk seluruh anggota grup.
 
@@ -395,6 +463,8 @@ def run_automation(
         batch_size=batch_size,
         duration_min_sec=config.duration_min_sec,
         duration_max_sec=config.duration_max_sec,
+        device_gap_sec=config.device_gap_sec,
+        arrange_windows=config.arrange_windows,
         interaction_enabled=config.interaction_enabled,
         started_at=_now_iso(),
     )
@@ -434,24 +504,66 @@ def run_automation(
                 }
             )
 
-        with ThreadPoolExecutor(max_workers=max(1, len(chunk))) as pool:
-            futures = [
-                pool.submit(
-                    _run_device_session,
-                    client,
-                    index,
-                    name,
-                    device,
-                    batch_number,
-                    config,
-                    progress,
-                    stop,
-                    sleep_fn,
-                    clock_fn,
-                    generator,
-                )
-                for index, name, device in chunk
+        rects: list[tuple[int, int, int, int] | None] = [None] * len(chunk)
+        if config.arrange_windows and screen_rect is not None:
+            aspects = [
+                _device_aspect(client, index) for index, _name, _device in chunk
             ]
+            rects = list(plan_window_rects(aspects, screen_rect))
+
+        gap_sec = max(0, int(config.device_gap_sec))
+
+        def run_one(pos_item):
+            position, (index, name, device) = pos_item
+            needs_launch = not device.get("is_process_started")
+            if needs_launch and position > 0 and gap_sec > 0:
+                delay = position * gap_sec
+                if progress is not None:
+                    progress(
+                        {
+                            "name": name,
+                            "index": str(index),
+                            "batch": batch_number,
+                            "phase": "gap",
+                            "message": (
+                                f"Menunggu jeda {delay} detik sebelum "
+                                "menyalakan device…"
+                            ),
+                            "status": "",
+                        }
+                    )
+                try:
+                    _sleep_interruptibly(delay, sleep_fn, stop)
+                except _Stopped:
+                    rep = DeviceReport(
+                        name=name,
+                        index=str(index),
+                        batch=batch_number,
+                        status="stopped",
+                        message="Dihentikan oleh pengguna.",
+                        started_at=_now_iso(),
+                        finished_at=_now_iso(),
+                    )
+                    _emit(progress, rep, "stop", rep.message, "stopped")
+                    return rep
+
+            return _run_device_session(
+                client,
+                index,
+                name,
+                device,
+                batch_number,
+                config,
+                progress,
+                stop,
+                sleep_fn,
+                clock_fn,
+                generator,
+                rects[position],
+            )
+
+        with ThreadPoolExecutor(max_workers=max(1, len(chunk))) as pool:
+            futures = [pool.submit(run_one, item) for item in enumerate(chunk)]
             for future in futures:
                 report.devices.append(future.result())
 

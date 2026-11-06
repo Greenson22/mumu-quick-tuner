@@ -69,6 +69,17 @@ class FakeClient:
         self._record("adb_shell", str(index), command)
         return ""
 
+    def layout_window(
+        self, index: str, x: int, y: int, width: int, height: int
+    ) -> None:
+        self._record("layout_window", str(index), x, y, width, height)
+
+    def get_settings_keys(self, index: str, keys: list[str]) -> dict[str, str]:
+        return {
+            "resolution_width.custom": "540",
+            "resolution_height.custom": "960",
+        }
+
     def get_screen_size(self, index: str) -> tuple[int, int]:
         return 1280, 720
 
@@ -94,6 +105,8 @@ class RunAutomationTests(unittest.TestCase):
             "batch_size": 3,
             "duration_min_sec": 1,
             "duration_max_sec": 1,
+            "device_gap_sec": 0,
+            "arrange_windows": False,
             "interaction_enabled": True,
             "scale_coordinates": True,
             "apps": [
@@ -104,7 +117,7 @@ class RunAutomationTests(unittest.TestCase):
         values.update(overrides)
         return AutomationConfig(**values)
 
-    def _run(self, client, targets, config, missing=None, should_stop=None):
+    def _run(self, client, targets, config, missing=None, should_stop=None, screen_rect=None):
         if not client.installed:
             packages = [app.package for app in config.enabled_apps()]
             client.installed = {
@@ -121,6 +134,7 @@ class RunAutomationTests(unittest.TestCase):
             should_stop=should_stop,
             sleep=self.clock.sleep,
             clock=self.clock.now,
+            screen_rect=screen_rect,
         )
 
     def test_batch_partition_and_report(self) -> None:
@@ -263,6 +277,41 @@ class RunAutomationTests(unittest.TestCase):
         by_name = {device.name: device for device in report.devices}
         self.assertEqual(by_name["hilang"].status, "skipped")
         self.assertIn("tidak ditemukan", by_name["hilang"].message)
+
+    def test_device_launch_gap_applied_in_batch(self) -> None:
+        client = FakeClient()
+        config = self._config(
+            app_count=1,
+            batch_size=3,
+            device_gap_sec=30,
+        )
+        report = self._run(
+            client,
+            _targets(3),
+            config,
+        )
+        self.assertEqual(report.counts().get("success"), 3)
+        # Total waktu clock harus mencakup minimal 2x gap 30 detik = 60 detik
+        self.assertGreaterEqual(self.clock.now(), 60.0)
+
+    def test_window_layout_is_called_for_each_device(self) -> None:
+        client = FakeClient()
+        config = self._config(
+            app_count=1,
+            batch_size=2,
+            arrange_windows=True,
+        )
+        self._run(
+            client,
+            _targets(2),
+            config,
+            screen_rect=(0, 0, 1920, 1080),
+        )
+        layout_calls = [c for c in client.calls if c[0] == "layout_window"]
+        # Dipanggil saat launch dan setelah Android siap
+        self.assertGreaterEqual(len(layout_calls), 2)
+        indices_arranged = {call[1] for call in layout_calls}
+        self.assertEqual(indices_arranged, {"0", "1"})
 
 
 if __name__ == "__main__":

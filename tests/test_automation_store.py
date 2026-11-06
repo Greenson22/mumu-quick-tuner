@@ -31,6 +31,8 @@ class AutomationStoreTests(unittest.TestCase):
     def test_defaults(self) -> None:
         config = self.store.load()
         self.assertEqual(config.batch_size, 3)
+        self.assertEqual(config.device_gap_sec, 30)
+        self.assertTrue(config.arrange_windows)
         self.assertEqual(config.duration_min_sec, 240)
         self.assertEqual(config.duration_max_sec, 360)
         self.assertEqual(config.apps, [])
@@ -40,6 +42,8 @@ class AutomationStoreTests(unittest.TestCase):
             batch_size=2,
             duration_min_sec=120,
             duration_max_sec=180,
+            device_gap_sec=15,
+            arrange_windows=True,
             interaction_enabled=True,
             reference_width=1280,
             reference_height=720,
@@ -70,6 +74,8 @@ class AutomationStoreTests(unittest.TestCase):
         self.assertEqual(loaded.batch_size, 2)
         self.assertEqual(loaded.duration_min_sec, 120)
         self.assertEqual(loaded.duration_max_sec, 180)
+        self.assertEqual(loaded.device_gap_sec, 15)
+        self.assertTrue(loaded.arrange_windows)
         self.assertEqual(len(loaded.apps), 1)
         self.assertEqual(loaded.apps[0].package, "com.whatsapp")
         self.assertEqual(len(loaded.apps[0].steps), 4)
@@ -168,6 +174,15 @@ class AutomationValidationTests(unittest.TestCase):
             apps=[AutomationApp(package="com.whatsapp")],
         )
         self.assertIn("minimum", config.validation_error() or "")
+
+    def test_rejects_invalid_device_gap(self) -> None:
+        config = AutomationConfig(
+            device_gap_sec=-5,
+            apps=[AutomationApp(package="com.whatsapp")],
+        )
+        self.assertIn("Jeda antar device", config.validation_error() or "")
+        config.device_gap_sec = 9999
+        self.assertIn("Jeda antar device", config.validation_error() or "")
 
     def test_valid_config(self) -> None:
         config = self._config(

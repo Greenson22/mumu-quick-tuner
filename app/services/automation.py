@@ -17,6 +17,8 @@ DEFAULT_DURATION_MIN_SEC = 240
 DEFAULT_DURATION_MAX_SEC = 360
 DEFAULT_REFERENCE_WIDTH = 1280
 DEFAULT_REFERENCE_HEIGHT = 720
+DEFAULT_DEVICE_GAP_SEC = 30
+MAX_DEVICE_GAP_SEC = 600
 
 STEP_ACTIONS = ("tap", "swipe", "wait", "key")
 KEY_NAMES = {
@@ -172,8 +174,10 @@ class AutomationConfig:
     batch_size: int = DEFAULT_BATCH_SIZE
     duration_min_sec: int = DEFAULT_DURATION_MIN_SEC
     duration_max_sec: int = DEFAULT_DURATION_MAX_SEC
+    device_gap_sec: int = DEFAULT_DEVICE_GAP_SEC
     interaction_enabled: bool = True
     scale_coordinates: bool = True
+    arrange_windows: bool = True
     reference_width: int = DEFAULT_REFERENCE_WIDTH
     reference_height: int = DEFAULT_REFERENCE_HEIGHT
     apps: list[AutomationApp] = field(default_factory=list)
@@ -184,8 +188,10 @@ class AutomationConfig:
             "batch_size": self.batch_size,
             "duration_min_sec": self.duration_min_sec,
             "duration_max_sec": self.duration_max_sec,
+            "device_gap_sec": self.device_gap_sec,
             "interaction_enabled": self.interaction_enabled,
             "scale_coordinates": self.scale_coordinates,
+            "arrange_windows": self.arrange_windows,
             "reference_resolution": [self.reference_width, self.reference_height],
             "apps": [app.to_dict() for app in self.apps],
         }
@@ -213,6 +219,9 @@ class AutomationConfig:
                     if app.package:
                         apps.append(app)
 
+        gap = _to_int(data.get("device_gap_sec"), DEFAULT_DEVICE_GAP_SEC)
+        gap = max(0, min(MAX_DEVICE_GAP_SEC, gap))
+
         return cls(
             batch_size=max(1, _to_int(data.get("batch_size"), DEFAULT_BATCH_SIZE)),
             duration_min_sec=max(
@@ -221,8 +230,10 @@ class AutomationConfig:
             duration_max_sec=max(
                 1, _to_int(data.get("duration_max_sec"), DEFAULT_DURATION_MAX_SEC)
             ),
+            device_gap_sec=gap,
             interaction_enabled=bool(data.get("interaction_enabled", True)),
             scale_coordinates=bool(data.get("scale_coordinates", True)),
+            arrange_windows=bool(data.get("arrange_windows", True)),
             reference_width=max(1, width),
             reference_height=max(1, height),
             apps=apps,
@@ -238,6 +249,10 @@ class AutomationConfig:
             return "Durasi minimum minimal 1 detik."
         if self.duration_min_sec > self.duration_max_sec:
             return "Durasi minimum tidak boleh lebih besar dari durasi maksimum."
+        if not 0 <= self.device_gap_sec <= MAX_DEVICE_GAP_SEC:
+            return (
+                f"Jeda antar device harus antara 0 dan {MAX_DEVICE_GAP_SEC} detik."
+            )
         if self.reference_width < 1 or self.reference_height < 1:
             return "Resolusi referensi script tidak valid."
         enabled = self.enabled_apps()
@@ -346,6 +361,8 @@ class AutomationReport:
     duration_min_sec: int
     duration_max_sec: int
     interaction_enabled: bool
+    device_gap_sec: int = DEFAULT_DEVICE_GAP_SEC
+    arrange_windows: bool = True
     devices: list[DeviceReport] = field(default_factory=list)
     started_at: str = field(default_factory=_now_iso)
     finished_at: str = ""
@@ -365,7 +382,9 @@ class AutomationReport:
             "batch_size": self.batch_size,
             "duration_min_sec": self.duration_min_sec,
             "duration_max_sec": self.duration_max_sec,
+            "device_gap_sec": self.device_gap_sec,
             "interaction_enabled": self.interaction_enabled,
+            "arrange_windows": self.arrange_windows,
             "started_at": self.started_at,
             "finished_at": self.finished_at or _now_iso(),
             "stopped_by_user": self.stopped_by_user,
@@ -386,6 +405,9 @@ class AutomationReport:
             f"Grup: {self.group}",
             f"Batch size: {self.batch_size} device",
             f"Durasi per device: {duration_label}",
+            f"Jeda antar device: {self.device_gap_sec} detik",
+            "Susun jendela otomatis: "
+            + ("aktif" if self.arrange_windows else "nonaktif"),
             "Interaksi otomatis: "
             + ("aktif" if self.interaction_enabled else "nonaktif"),
             "",

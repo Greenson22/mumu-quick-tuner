@@ -260,6 +260,25 @@ QStatusBar {
     background: #14171f;
     color: #8b93a7;
 }
+QDialog {
+    background: #14171f;
+    color: #e6e9f0;
+}
+QDialog QLabel {
+    color: #e6e9f0;
+}
+QDialog QLabel#hint {
+    color: #8b93a7;
+}
+QDialog QDialogButtonBox QPushButton {
+    min-width: 80px;
+}
+QLineEdit {
+    color: #e6e9f0;
+}
+QLineEdit::placeholder {
+    color: #6b7280;
+}
 QMessageBox {
     background: #1c2130;
 }

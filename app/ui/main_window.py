@@ -1016,6 +1016,12 @@ class MainWindow(QMainWindow):
         self._automation_stop.clear()
         self._enter_automation_mode(group)
 
+        screen_rect: tuple[int, int, int, int] | None = None
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            geom = screen.availableGeometry()
+            screen_rect = (geom.x(), geom.y(), geom.width(), geom.height())
+
         def work():
             devices = self.client.list_devices()
             live_found, live_missing = self.group_store.resolve(group, devices)
@@ -1032,6 +1038,7 @@ class MainWindow(QMainWindow):
                 self.config.project_root / "logs",
                 progress=lambda payload: self.automationProgress.emit(payload),
                 should_stop=self._automation_stop.is_set,
+                screen_rect=screen_rect,
             )
 
         self._run_async(
@@ -1060,7 +1067,10 @@ class MainWindow(QMainWindow):
         text = (
             f"Otomatisasi grup '{group}' akan dijalankan.\n\n"
             f"• Device: {len(found)} ditemukan, batch {config.batch_size}\n"
+            f"• Jeda antar device: {config.device_gap_sec} detik\n"
             f"• Durasi acak per device: {minutes_min:g}–{minutes_max:g} menit\n"
+            f"• Susun jendela: "
+            f"{'aktif' if config.arrange_windows else 'nonaktif'}\n"
             f"• Aplikasi: {app_names}\n"
             f"• Interaksi otomatis: "
             f"{'aktif' if config.interaction_enabled else 'nonaktif'}\n\n"
