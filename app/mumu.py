@@ -41,6 +41,7 @@ def _extract_apps(data: object) -> list[tuple[str, str]]:
 
     def walk(node: object) -> None:
         if isinstance(node, dict):
+            # Format 1: Node itu sendiri mewakili satu app (memiliki field package/label)
             package = ""
             for key in _PACKAGE_KEYS:
                 value = node.get(key)
@@ -48,37 +49,37 @@ def _extract_apps(data: object) -> list[tuple[str, str]]:
                     package = value.strip()
                     break
 
-            label = ""
-            for key in _LABEL_KEYS:
-                value = node.get(key)
-                if isinstance(value, str) and value.strip():
-                    label = value.strip()
-                    break
-
-            if not package:
-                for key, value in node.items():
-                    if not isinstance(key, str) or not _looks_like_package(key):
-                        continue
-                    if isinstance(value, dict):
-                        package = key.strip()
-                        for label_key in _LABEL_KEYS:
-                            raw_label = value.get(label_key)
-                            if isinstance(raw_label, str) and raw_label.strip():
-                                label = raw_label.strip()
-                                break
-                        break
-                    if isinstance(value, str):
-                        package = key.strip()
-                        label = label or value.strip()
-                        break
-
             if package:
+                label = ""
+                for key in _LABEL_KEYS:
+                    value = node.get(key)
+                    if isinstance(value, str) and value.strip():
+                        label = value.strip()
+                        break
                 existing = found.get(package)
                 if existing is None or (label and existing == package):
                     found[package] = label or package
 
+            # Format 2: Dict berisi mapping { package_name: {app_name: ...} }
+            for key, value in node.items():
+                if isinstance(key, str) and _looks_like_package(key):
+                    pkg = key.strip()
+                    pkg_label = ""
+                    if isinstance(value, dict):
+                        for label_key in _LABEL_KEYS:
+                            raw_label = value.get(label_key)
+                            if isinstance(raw_label, str) and raw_label.strip():
+                                pkg_label = raw_label.strip()
+                                break
+                    elif isinstance(value, str) and value.strip():
+                        pkg_label = value.strip()
+                    existing = found.get(pkg)
+                    if existing is None or (pkg_label and existing == pkg):
+                        found[pkg] = pkg_label or pkg
+
             for value in node.values():
-                walk(value)
+                if isinstance(value, (dict, list)):
+                    walk(value)
         elif isinstance(node, list):
             for item in node:
                 walk(item)

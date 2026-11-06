@@ -125,6 +125,19 @@ class ExtractAppsTests(unittest.TestCase):
     def test_ignores_non_package_strings(self) -> None:
         self.assertEqual(_extract_apps({"status": "ok", "count": 3}), [])
 
+    def test_mumu_multiple_packages_mapping(self) -> None:
+        data = {
+            "active": "com.rikalg22.mytasks",
+            "android.ext.services": {"app_name": "Android Services Library"},
+            "com.android.chrome": {"app_name": "Chrome"},
+            "com.rikalg22.mytasks": {"app_name": "MyTasks"},
+        }
+        apps = dict(_extract_apps(data))
+        self.assertEqual(len(apps), 3)
+        self.assertEqual(apps["android.ext.services"], "Android Services Library")
+        self.assertEqual(apps["com.android.chrome"], "Chrome")
+        self.assertEqual(apps["com.rikalg22.mytasks"], "MyTasks")
+
 
 class SettingsStoreTests(unittest.TestCase):
     def setUp(self) -> None:

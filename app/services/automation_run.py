@@ -319,9 +319,18 @@ def _run_device_session(
         ]
         if missing:
             report.apps_missing = missing
+            _emit(
+                progress,
+                report,
+                "check",
+                f"{len(installed)} aplikasi terdeteksi ({len(missing)} belum terpasang).",
+            )
+        else:
+            _emit(progress, report, "check", f"{len(installed)} aplikasi terdeteksi.")
 
         screen: tuple[int, int] | None = None
         if config.interaction_enabled and config.scale_coordinates:
+            _emit(progress, report, "check", "Membaca resolusi layar device…")
             try:
                 screen = client.get_screen_size(index)
             except Exception:  # noqa: BLE001 - koordinat apa adanya
@@ -330,6 +339,9 @@ def _run_device_session(
         session_start = clock()
         deadline = session_start + report.duration_sec
         app_count = len(enabled_apps)
+
+        def _rem() -> int:
+            return max(0, int(round(deadline - clock())))
 
         iteration = 1
         while True:
@@ -348,16 +360,18 @@ def _run_device_session(
                 if config.interaction_loop and iteration > 1:
                     app_label += f" [putaran {iteration}]"
 
+                if app.package not in report.apps_opened:
+                    report.apps_opened.append(app.package)
+
                 _emit(
                     progress,
                     report,
                     "app",
                     f"Membuka {app_label}…",
+                    remaining_sec=_rem(),
                 )
                 try:
                     client.launch_app(index, app.package)
-                    if app.package not in report.apps_opened:
-                        report.apps_opened.append(app.package)
                 except Exception as exc:  # noqa: BLE001 - jangan gagalkan device, tetap lanjut
                     report.script_errors.append(f"Gagal membuka {app.display_name}: {exc}")
 
@@ -365,6 +379,13 @@ def _run_device_session(
                     # Beri waktu UI aplikasi muncul sebelum langkah pertama.
                     start_delay = float(getattr(config, "script_start_delay_sec", 2))
                     if start_delay > 0:
+                        _emit(
+                            progress,
+                            report,
+                            "loading",
+                            f"Aplikasi dibuka, menunggu loading ({int(start_delay)}s)…",
+                            remaining_sec=_rem(),
+                        )
                         _sleep_interruptibly(start_delay, sleep, should_stop)
 
                     for step_number, step in enumerate(app.steps, start=1):
@@ -376,6 +397,7 @@ def _run_device_session(
                             "script",
                             f"{app.display_name}: langkah {step_number}/"
                             f"{len(app.steps)} — {step.describe()}",
+                            remaining_sec=_rem(),
                         )
                         try:
                             _run_step(
@@ -410,6 +432,7 @@ def _run_device_session(
                                 report,
                                 "gap",
                                 f"Jeda interaksi {gap_sec} detik untuk {app.display_name}…",
+                                remaining_sec=_rem(),
                             )
                             _sleep_interruptibly(sleep_gap, sleep, should_stop)
 

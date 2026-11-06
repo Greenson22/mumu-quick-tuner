@@ -447,6 +447,43 @@ class RunAutomationTests(unittest.TestCase):
         gap_events = [e for e in events if e.get("phase") == "gap"]
         self.assertTrue(len(gap_events) >= 1)
         self.assertIn("Jeda interaksi", gap_events[0].get("message", ""))
+        self.assertIn("remaining_sec", gap_events[0])
+
+    def test_remaining_sec_emitted_during_app_and_script(self) -> None:
+        client = FakeClient()
+        events = []
+        config = self._config(
+            app_count=1,
+            batch_size=1,
+            duration_min_sec=40,
+            duration_max_sec=40,
+            script_start_delay_sec=1,
+            apps=[
+                AutomationApp(
+                    package="com.example.testapp",
+                    steps=[ScriptStep(action="tap", x=5, y=10)],
+                )
+            ],
+        )
+        from app.services.automation_run import run_automation
+        run_automation(
+            client=client,
+            group_name="Grup Rem",
+            targets=_targets(1),
+            missing=[],
+            config=config,
+            report_dir=self.report_dir,
+            progress=events.append,
+            sleep=self.clock.sleep,
+            clock=self.clock.now,
+        )
+        app_events = [e for e in events if e.get("phase") == "app"]
+        self.assertTrue(len(app_events) >= 1)
+        self.assertIn("remaining_sec", app_events[0])
+
+        script_events = [e for e in events if e.get("phase") == "script"]
+        self.assertTrue(len(script_events) >= 1)
+        self.assertIn("remaining_sec", script_events[0])
 
     def test_run_single_script_test(self) -> None:
         from app.services.automation_run import run_single_script_test

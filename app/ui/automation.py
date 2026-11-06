@@ -51,6 +51,7 @@ PHASE_LABELS = {
     "duration": "Durasi",
     "check": "Memeriksa aplikasi",
     "app": "Membuka aplikasi",
+    "loading": "Menunggu loading",
     "script": "Interaksi",
     "session": "Sesi berjalan",
     "shutdown": "Mematikan",
@@ -1632,7 +1633,10 @@ class AutomationSection(ScrollSection):
         phase = str(payload.get("phase", ""))
         status = str(payload.get("status", ""))
 
-        if "remaining_sec" in payload and phase == "session":
+        if "remaining_sec" in payload and phase == "gap" and not payload.get("duration"):
+            rem = int(payload["remaining_sec"])
+            self.progress_table.item(row, 4).setText(f"Jeda {rem}s")
+        elif "remaining_sec" in payload:
             rem = int(payload["remaining_sec"])
             dur = int(payload.get("duration", 0))
             if dur > 0:
@@ -1641,9 +1645,6 @@ class AutomationSection(ScrollSection):
                 )
             else:
                 self.progress_table.item(row, 4).setText(_duration_text(rem))
-        elif "remaining_sec" in payload and phase == "gap":
-            rem = int(payload["remaining_sec"])
-            self.progress_table.item(row, 4).setText(f"Jeda {rem}s")
         elif payload.get("duration"):
             self.progress_table.item(row, 4).setText(
                 _duration_text(int(payload["duration"]))
