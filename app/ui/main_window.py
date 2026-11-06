@@ -215,7 +215,11 @@ class MainWindow(QMainWindow):
         self.performa = PerformaSection()
         self.profiles = ProfilesSection(self.store)
         self.groups = GroupsSection(self.store, self.group_store)
-        self.automation = AutomationSection(self.group_store, self.automation_store)
+        self.automation = AutomationSection(
+            self.group_store,
+            self.automation_store,
+            client=self.client,
+        )
 
         self.tabs.addTab(self.tampilan, "Tampilan")
         self.tabs.addTab(self.grafis, "Grafis")

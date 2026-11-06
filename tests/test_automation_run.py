@@ -385,6 +385,29 @@ class RunAutomationTests(unittest.TestCase):
         # Clock mencakup jeda antar siklus (minimal 15 detik)
         self.assertGreaterEqual(self.clock.now(), 15.0)
 
+    def test_run_single_script_test(self) -> None:
+        from app.services.automation_run import run_single_script_test
+
+        client = FakeClient()
+        steps = [
+            ScriptStep(action="tap", x=100, y=200, delay_ms=50),
+            ScriptStep(action="text", text="uji coba", delay_ms=50),
+        ]
+        events = []
+        errs = run_single_script_test(
+            client=client,
+            index="0",
+            steps=steps,
+            package="com.example.test",
+            progress=events.append,
+            sleep=self.clock.sleep,
+        )
+        self.assertEqual(errs, [])
+        self.assertTrue(any(c[0] == "launch_app" and c[2] == "com.example.test" for c in client.calls))
+        adb_calls = [c[2] for c in client.calls if c[0] == "adb_shell"]
+        self.assertTrue(any("input tap 100 200" in cmd for cmd in adb_calls))
+        self.assertTrue(any("input text" in cmd and "uji%scoba" in cmd for cmd in adb_calls))
+
 
 if __name__ == "__main__":
     unittest.main()

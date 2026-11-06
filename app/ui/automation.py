@@ -35,6 +35,7 @@ from app.services.automation import (
     ScriptStep,
     looks_like_package,
 )
+from app.services.automation_run import run_single_script_test
 from app.services.recorder import ActionRecorder, find_mumu_windows, pick_window_under_cursor
 from app.services.groups import GroupStore
 from app.ui.sections import ScrollSection
@@ -508,6 +509,198 @@ class RecordDialog(QDialog):
         super().closeEvent(event)
 
 
+class ScriptTestDialog(QDialog):
+    """Dialog untuk menguji coba langkah skrip langsung pada satu device."""
+
+    progressSignal = pyqtSignal(dict)
+    finishedSignal = pyqtSignal(list)
+
+    def __init__(
+        self,
+        client,
+        app: AutomationApp,
+        steps: list[ScriptStep],
+        config: AutomationConfig | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Uji Coba Script — {app.display_name}")
+        self.resize(520, 320)
+        self.client = client
+        self.app = app
+        self.steps = list(steps)
+        self.config = config or AutomationConfig()
+
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        self.device_combo = QComboBox()
+        self.refresh_btn = QPushButton("Refresh Device")
+        self.refresh_btn.clicked.connect(self._refresh_devices)
+
+        dev_row = QHBoxLayout()
+        dev_row.addWidget(QLabel("Target Device:"))
+        dev_row.addWidget(self.device_combo, 1)
+        dev_row.addWidget(self.refresh_btn)
+
+        self.launch_app_check = checkbox("Buka aplikasi sebelum mulai")
+        self.launch_app_check.setChecked(bool(self.app.package))
+
+        delay_holder = QWidget()
+        delay_row = QHBoxLayout(delay_holder)
+        delay_row.setContentsMargins(0, 0, 0, 0)
+        delay_row.setSpacing(8)
+        self.start_delay_spin = QSpinBox()
+        self.start_delay_spin.setRange(0, 300)
+        self.start_delay_spin.setSuffix(" detik")
+        self.start_delay_spin.setValue(self.config.script_start_delay_sec)
+        delay_row.addWidget(QLabel("Waktu tunggu setelah buka app:"))
+        delay_row.addWidget(self.start_delay_spin)
+        delay_row.addStretch(1)
+
+        self.start_btn = QPushButton("▶ Mulai Uji Coba")
+        self.start_btn.setObjectName("primary")
+        self.stop_btn = QPushButton("■ Hentikan")
+        self.stop_btn.setObjectName("danger")
+        self.stop_btn.setEnabled(False)
+
+        ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(self.start_btn)
+        ctrl_row.addWidget(self.stop_btn)
+        ctrl_row.addStretch(1)
+
+        self.status_label = QLabel(
+            f"Total {len(self.steps)} langkah siap diuji. "
+            "Pilih device yang sedang aktif lalu klik 'Mulai Uji Coba'."
+        )
+        self.status_label.setObjectName("hint")
+        self.status_label.setWordWrap(True)
+
+        close_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_box.rejected.connect(self._on_close)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+        layout.addLayout(dev_row)
+        layout.addWidget(self.launch_app_check)
+        layout.addWidget(delay_holder)
+        layout.addLayout(ctrl_row)
+        layout.addWidget(self.status_label, 1)
+        layout.addWidget(close_box)
+
+        self.start_btn.clicked.connect(self._start_test)
+        self.stop_btn.clicked.connect(self._stop_test)
+        self.progressSignal.connect(self._on_progress)
+        self.finishedSignal.connect(self._on_finished)
+
+        self._refresh_devices()
+
+    def _refresh_devices(self) -> None:
+        self.device_combo.clear()
+        if not self.client:
+            self.device_combo.addItem("Client tidak tersedia", "")
+            self.start_btn.setEnabled(False)
+            return
+
+        try:
+            devices = self.client.list_devices()
+        except Exception:
+            devices = {}
+
+        ready_count = 0
+        for index, dev in sorted(devices.items(), key=lambda x: str(x[0])):
+            name = dev.get("name", f"Device {index}")
+            is_ready = bool(dev.get("is_android_started"))
+            status_text = " [Android Siap]" if is_ready else " [Mati / Belum Siap]"
+            self.device_combo.addItem(f"{name} (index {index}){status_text}", str(index))
+            if is_ready:
+                ready_count += 1
+                if ready_count == 1:
+                    self.device_combo.setCurrentIndex(self.device_combo.count() - 1)
+
+        if not devices:
+            self.device_combo.addItem("Tidak ada device terdeteksi", "")
+            self.start_btn.setEnabled(False)
+        else:
+            self.start_btn.setEnabled(True)
+
+    def _start_test(self) -> None:
+        index = str(self.device_combo.currentData() or "").strip()
+        if not index:
+            QMessageBox.warning(self, "Pilih Device", "Pilih device target terlebih dahulu.")
+            return
+
+        if not self.steps:
+            QMessageBox.information(self, "Script Kosong", "Belum ada langkah script untuk diuji.")
+            return
+
+        self._stop_event.clear()
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.refresh_btn.setEnabled(False)
+        self.device_combo.setEnabled(False)
+        self.launch_app_check.setEnabled(False)
+        self.start_delay_spin.setEnabled(False)
+
+        cfg = AutomationConfig(
+            script_start_delay_sec=self.start_delay_spin.value(),
+            reference_width=self.config.reference_width,
+            reference_height=self.config.reference_height,
+            scale_coordinates=self.config.scale_coordinates,
+            interaction_enabled=True,
+        )
+
+        package_to_open = self.app.package if self.launch_app_check.isChecked() else ""
+
+        def worker():
+            errs = run_single_script_test(
+                client=self.client,
+                index=index,
+                steps=self.steps,
+                package=package_to_open,
+                config=cfg,
+                progress=lambda p: self.progressSignal.emit(p),
+                should_stop=self._stop_event.is_set,
+            )
+            self.finishedSignal.emit(errs)
+
+        self._thread = threading.Thread(target=worker, daemon=True)
+        self._thread.start()
+
+    def _stop_test(self) -> None:
+        self._stop_event.set()
+        self.status_label.setText("Menghentikan uji coba script…")
+
+    def _on_progress(self, payload: dict) -> None:
+        msg = str(payload.get("message", ""))
+        self.status_label.setText(msg)
+
+    def _on_finished(self, errors: list) -> None:
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.refresh_btn.setEnabled(True)
+        self.device_combo.setEnabled(True)
+        self.launch_app_check.setEnabled(True)
+        self.start_delay_spin.setEnabled(True)
+
+        if not errors:
+            self.status_label.setText("✅ Uji coba selesai! Semua langkah berhasil dijalankan.")
+        else:
+            err_summary = "\n• " + "\n• ".join(errors[:5])
+            self.status_label.setText(f"Selesai dengan catatan:{err_summary}")
+
+    def _on_close(self) -> None:
+        if self._thread and self._thread.is_alive():
+            self._stop_event.set()
+        self.reject()
+
+    def closeEvent(self, event) -> None:
+        if self._thread and self._thread.is_alive():
+            self._stop_event.set()
+        super().closeEvent(event)
+
+
 class ScriptDialog(QDialog):
     """Editor daftar langkah untuk satu aplikasi."""
 
@@ -516,14 +709,18 @@ class ScriptDialog(QDialog):
         app: AutomationApp,
         ref_width: int = 1280,
         ref_height: int = 720,
+        client=None,
+        config: AutomationConfig | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Script — {app.display_name}")
-        self.resize(750, 440)
+        self.resize(780, 450)
         self.app = app
         self.ref_width = ref_width
         self.ref_height = ref_height
+        self.client = client
+        self.config = config or AutomationConfig()
         self.steps = [ScriptStep.from_dict(step.to_dict()) for step in app.steps]
         self.result_steps: list[ScriptStep] = []
 
@@ -555,6 +752,7 @@ class ScriptDialog(QDialog):
         add_text = QPushButton("+ Teks")
         record_btn = QPushButton("● Rekam Aksi…")
         record_btn.setObjectName("primary")
+        test_btn = QPushButton("▶ Uji di Device…")
         edit = QPushButton("Ubah…")
         remove = QPushButton("Hapus")
         up = QPushButton("Naik")
@@ -566,6 +764,7 @@ class ScriptDialog(QDialog):
             add_key,
             add_text,
             record_btn,
+            test_btn,
             edit,
             remove,
             up,
@@ -575,8 +774,8 @@ class ScriptDialog(QDialog):
         buttons.addStretch(1)
 
         note = QLabel(
-            "Klik '● Rekam Aksi…' untuk merekam klik, geser, dan ketik langsung "
-            "dari jendela emulator secara otomatis. Atau tambahkan langkah manual."
+            "Klik '● Rekam Aksi…' untuk merekam langsung dari emulator. "
+            "Gunakan '▶ Uji di Device…' untuk mencoba skrip langsung di satu device."
         )
         note.setObjectName("hint")
         note.setWordWrap(True)
@@ -602,12 +801,28 @@ class ScriptDialog(QDialog):
         add_key.clicked.connect(lambda: self._add("key"))
         add_text.clicked.connect(lambda: self._add("text"))
         record_btn.clicked.connect(self._record)
+        test_btn.clicked.connect(self._test_script)
         edit.clicked.connect(self._edit)
         remove.clicked.connect(self._remove)
         up.clicked.connect(lambda: self._move(-1))
         down.clicked.connect(lambda: self._move(1))
 
         self._refresh()
+
+    def _test_script(self) -> None:
+        if not self.steps:
+            QMessageBox.information(
+                self, "Script Kosong", "Tambahkan atau rekam minimal satu langkah terlebih dahulu."
+            )
+            return
+        dialog = ScriptTestDialog(
+            client=self.client,
+            app=self.app,
+            steps=self.steps,
+            config=self.config,
+            parent=self,
+        )
+        dialog.exec()
 
     def _refresh(self) -> None:
         self.table.setRowCount(0)
@@ -818,11 +1033,13 @@ class AutomationSection(ScrollSection):
         self,
         group_store: GroupStore,
         automation_store: AutomationStore | None = None,
+        client=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.group_store = group_store
         self.store = automation_store or AutomationStore()
+        self.client = client
         self.config: AutomationConfig = self.store.load()
         self.installed_apps: list[tuple[str, str]] = []
         self._rows: dict[str, int] = {}
@@ -925,6 +1142,16 @@ class AutomationSection(ScrollSection):
         )
         card.add_row("Interaksi", self.interaction_check)
 
+        self.script_start_delay_spin = QSpinBox()
+        self.script_start_delay_spin.setRange(0, 300)
+        self.script_start_delay_spin.setSuffix(" detik")
+        card.add_row(
+            "Waktu mulai script",
+            self.script_start_delay_spin,
+            "Waktu tunggu setelah aplikasi dibuka sebelum langkah pertama dijalankan. "
+            "Memberi waktu loading/splash screen.",
+        )
+
         scale_holder = QWidget()
         scale_row = QHBoxLayout(scale_holder)
         scale_row.setContentsMargins(0, 0, 0, 0)
@@ -971,6 +1198,7 @@ class AutomationSection(ScrollSection):
             self.ref_height,
             self.loop_count_spin,
             self.loop_delay_spin,
+            self.script_start_delay_spin,
         ):
             widget.valueChanged.connect(self._save_config)
         self.loop_mode_combo.currentIndexChanged.connect(self._on_loop_mode_changed)
@@ -1139,6 +1367,7 @@ class AutomationSection(ScrollSection):
             self.loop_mode_combo,
             self.loop_count_spin,
             self.loop_delay_spin,
+            self.script_start_delay_spin,
             self.arrange_check,
             self.interaction_check,
             self.scale_check,
@@ -1276,6 +1505,7 @@ class AutomationSection(ScrollSection):
             self.scale_check.setChecked(self.config.scale_coordinates)
             self.ref_width.setValue(self.config.reference_width)
             self.ref_height.setValue(self.config.reference_height)
+            self.script_start_delay_spin.setValue(self.config.script_start_delay_sec)
         finally:
             self._loading = False
 
@@ -1288,6 +1518,7 @@ class AutomationSection(ScrollSection):
             loop_mode=str(self.loop_mode_combo.currentData()),
             loop_count=self.loop_count_spin.value(),
             loop_delay_sec=self.loop_delay_spin.value(),
+            script_start_delay_sec=self.script_start_delay_spin.value(),
             arrange_windows=self.arrange_check.isChecked(),
             interaction_enabled=self.interaction_check.isChecked(),
             scale_coordinates=self.scale_check.isChecked(),
@@ -1392,6 +1623,8 @@ class AutomationSection(ScrollSection):
             app,
             ref_width=self.config.reference_width,
             ref_height=self.config.reference_height,
+            client=self.client,
+            config=self.config,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:

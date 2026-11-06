@@ -349,7 +349,9 @@ def _run_device_session(
                 continue
 
             # Beri waktu UI aplikasi muncul sebelum langkah pertama.
-            _sleep_interruptibly(2.0, sleep, should_stop)
+            start_delay = float(getattr(config, "script_start_delay_sec", 2))
+            if start_delay > 0:
+                _sleep_interruptibly(start_delay, sleep, should_stop)
 
             for step_number, step in enumerate(app.steps, start=1):
                 if should_stop():
@@ -689,3 +691,80 @@ def run_automation(
     report.finished_at = _now_iso()
     write_report(report, report_dir)
     return report
+
+
+def run_single_script_test(
+    client,
+    index: str,
+    steps: list[ScriptStep],
+    package: str = "",
+    config: AutomationConfig | None = None,
+    progress: Callable[[dict], None] | None = None,
+    should_stop: StopCallback | None = None,
+    sleep: SleepCallback | None = None,
+) -> list[str]:
+    """Uji coba langkah-langkah skrip langsung ke satu device tertentu.
+
+    Fungsi ini tidak mematikan device dan tidak mengubah sesi grup, sehingga
+    sangat cocok untuk memverifikasi akurasi tap, swipe, dan teks.
+
+    Returns:
+        Daftar pesan error jika ada langkah yang gagal.
+    """
+    stop_fn = should_stop or (lambda: False)
+    sleep_fn = sleep or _default_sleep
+    cfg = config or AutomationConfig()
+
+    errors: list[str] = []
+
+    def notify(step_num: int, message: str, status: str = "") -> None:
+        if progress is not None:
+            progress(
+                {
+                    "step": step_num,
+                    "total": len(steps),
+                    "message": message,
+                    "status": status,
+                }
+            )
+
+    try:
+        # Jika ada nama paket aplikasi, buka aplikasinya terlebih dahulu
+        if package and package.strip():
+            notify(0, f"Membuka aplikasi {package}…")
+            try:
+                client.launch_app(index, package.strip())
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Gagal membuka aplikasi: {exc}")
+
+            start_delay = float(getattr(cfg, "script_start_delay_sec", 2))
+            if start_delay > 0:
+                notify(0, f"Menunggu {start_delay:g} detik sebelum mulai…")
+                _sleep_interruptibly(start_delay, sleep_fn, stop_fn)
+
+        screen: tuple[int, int] | None = None
+        if cfg.interaction_enabled and cfg.scale_coordinates:
+            try:
+                screen = client.get_screen_size(index)
+            except Exception:  # noqa: BLE001
+                screen = None
+
+        for pos, step in enumerate(steps, start=1):
+            if stop_fn():
+                raise _Stopped()
+
+            notify(pos, f"Langkah {pos}/{len(steps)}: {step.describe()}")
+            try:
+                _run_step(client, index, step, cfg, screen, sleep_fn, stop_fn)
+            except _Stopped:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                err_msg = f"Langkah {pos} ({step.describe()}) gagal: {exc}"
+                errors.append(err_msg)
+
+        notify(len(steps), "Uji coba skrip selesai.", "success")
+    except _Stopped:
+        notify(0, "Uji coba dihentikan oleh pengguna.", "stopped")
+        errors.append("Dihentikan oleh pengguna.")
+
+    return errors

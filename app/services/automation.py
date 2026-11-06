@@ -22,6 +22,8 @@ MAX_DEVICE_GAP_SEC = 600
 DEFAULT_LOOP_MODE = "none"
 DEFAULT_LOOP_COUNT = 1
 DEFAULT_LOOP_DELAY_SEC = 60
+DEFAULT_SCRIPT_START_DELAY_SEC = 2
+MAX_SCRIPT_START_DELAY_SEC = 300
 
 STEP_ACTIONS = ("tap", "swipe", "wait", "key", "text")
 KEY_NAMES = {
@@ -204,6 +206,7 @@ class AutomationConfig:
     loop_mode: str = DEFAULT_LOOP_MODE
     loop_count: int = DEFAULT_LOOP_COUNT
     loop_delay_sec: int = DEFAULT_LOOP_DELAY_SEC
+    script_start_delay_sec: int = DEFAULT_SCRIPT_START_DELAY_SEC
     apps: list[AutomationApp] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -220,6 +223,7 @@ class AutomationConfig:
             "loop_mode": self.loop_mode,
             "loop_count": self.loop_count,
             "loop_delay_sec": self.loop_delay_sec,
+            "script_start_delay_sec": self.script_start_delay_sec,
             "apps": [app.to_dict() for app in self.apps],
         }
 
@@ -254,6 +258,13 @@ class AutomationConfig:
             loop_mode = DEFAULT_LOOP_MODE
         loop_count = max(1, _to_int(data.get("loop_count"), DEFAULT_LOOP_COUNT))
         loop_delay = max(0, min(3600, _to_int(data.get("loop_delay_sec"), DEFAULT_LOOP_DELAY_SEC)))
+        start_delay = max(
+            0,
+            min(
+                MAX_SCRIPT_START_DELAY_SEC,
+                _to_int(data.get("script_start_delay_sec"), DEFAULT_SCRIPT_START_DELAY_SEC),
+            ),
+        )
 
         return cls(
             batch_size=max(1, _to_int(data.get("batch_size"), DEFAULT_BATCH_SIZE)),
@@ -272,6 +283,7 @@ class AutomationConfig:
             loop_mode=loop_mode,
             loop_count=loop_count,
             loop_delay_sec=loop_delay,
+            script_start_delay_sec=start_delay,
             apps=apps,
         )
 
@@ -295,6 +307,8 @@ class AutomationConfig:
             return "Jumlah pengulangan batch minimal 1."
         if not 0 <= self.loop_delay_sec <= 3600:
             return "Jeda antar pengulangan batch harus antara 0 dan 3600 detik."
+        if not 0 <= self.script_start_delay_sec <= MAX_SCRIPT_START_DELAY_SEC:
+            return f"Waktu mulai script harus antara 0 dan {MAX_SCRIPT_START_DELAY_SEC} detik."
         enabled = self.enabled_apps()
         if not enabled:
             return "Aktifkan minimal satu aplikasi otomatisasi."
