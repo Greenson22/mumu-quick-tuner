@@ -178,6 +178,21 @@ def _installed_packages(
     return packages
 
 
+def _escape_adb_text(text: str) -> str:
+    """Escape teks untuk perintah `input text` di adb shell."""
+    # Pada adb shell input text, spasi paling andal dikirim sebagai %s
+    # Karakter seperti $ ` " \ perlu di-escape dari shell interpretasi
+    escaped = ""
+    for char in text:
+        if char == " ":
+            escaped += "%s"
+        elif char in ('"', "'", "\\", "$", "`", "(", ")", "<", ">", "&", ";", "|", "*"):
+            escaped += "\\" + char
+        else:
+            escaped += char
+    return f'"{escaped}"'
+
+
 def _run_step(
     client,
     index: str,
@@ -209,6 +224,10 @@ def _run_step(
     elif step.action == "key":
         code = KEY_NAMES.get(step.key, KEY_NAMES["back"])
         client.adb_shell(index, f"input keyevent {code}")
+    elif step.action == "text":
+        if step.text:
+            escaped = _escape_adb_text(step.text)
+            client.adb_shell(index, f"input text {escaped}")
 
     if step.delay_ms > 0:
         _sleep_interruptibly(step.delay_ms / 1000.0, sleep, should_stop)
@@ -484,95 +503,168 @@ def run_automation(
     ]
 
     stopped = False
-    for batch_number, chunk in enumerate(chunks, start=1):
-        if stop():
-            stopped = True
-            break
+    cycle = 1
+    total_cycles = config.loop_count if config.loop_mode == "count" else (1 if config.loop_mode == "none" else -1)
 
-        if progress is not None:
+    while not stop():
+        cycle_label = f"Siklus {cycle}" if total_cycles == -1 else (f"Siklus {cycle} dari {total_cycles}" if total_cycles > 1 else "")
+        if cycle_label and progress is not None:
             progress(
                 {
                     "name": "",
                     "index": "",
-                    "batch": batch_number,
-                    "phase": "batch",
-                    "message": f"Memulai batch {batch_number} dari {len(chunks)}.",
+                    "batch": 0,
+                    "cycle": cycle,
+                    "phase": "cycle",
+                    "message": f"Memulai {cycle_label}...",
                     "status": "",
                 }
             )
 
-        rects: list[tuple[int, int, int, int] | None] = [None] * len(chunk)
-        if config.arrange_windows and screen_rect is not None:
-            aspects = [
-                _device_aspect(client, index) for index, _name, _device in chunk
-            ]
-            rects = list(plan_window_rects(aspects, screen_rect))
+        for batch_number, chunk in enumerate(chunks, start=1):
+            if stop():
+                stopped = True
+                break
 
-        gap_sec = max(0, int(config.device_gap_sec))
+            if progress is not None:
+                batch_msg = f"Memulai batch {batch_number} dari {len(chunks)}"
+                if cycle_label:
+                    batch_msg += f" ({cycle_label})"
+                progress(
+                    {
+                        "name": "",
+                        "index": "",
+                        "batch": batch_number,
+                        "cycle": cycle,
+                        "phase": "batch",
+                        "message": f"{batch_msg}.",
+                        "status": "",
+                    }
+                )
 
-        def run_one(pos_item):
-            position, (index, name, device) = pos_item
-            needs_launch = not device.get("is_process_started")
-            if needs_launch and position > 0 and gap_sec > 0:
-                total_delay = position * gap_sec
-                gap_deadline = clock_fn() + total_delay
-                while True:
-                    if stop():
-                        rep = DeviceReport(
-                            name=name,
-                            index=str(index),
-                            batch=batch_number,
-                            status="stopped",
-                            message="Dihentikan oleh pengguna.",
-                            started_at=_now_iso(),
-                            finished_at=_now_iso(),
-                        )
-                        _emit(progress, rep, "stop", rep.message, "stopped")
-                        return rep
-                    remaining_gap = max(0.0, gap_deadline - clock_fn())
-                    if remaining_gap <= 0:
-                        break
-                    if progress is not None:
-                        progress(
-                            {
-                                "name": name,
-                                "index": str(index),
-                                "batch": batch_number,
-                                "phase": "gap",
-                                "message": (
-                                    f"Menunggu jeda {int(round(remaining_gap))} detik sebelum "
-                                    "menyalakan device…"
-                                ),
-                                "status": "",
-                                "remaining_sec": int(round(remaining_gap)),
-                            }
-                        )
-                    chunk = min(1.0, remaining_gap)
-                    sleep_fn(chunk)
+            rects: list[tuple[int, int, int, int] | None] = [None] * len(chunk)
+            if config.arrange_windows and screen_rect is not None:
+                aspects = [
+                    _device_aspect(client, index) for index, _name, _device in chunk
+                ]
+                rects = list(plan_window_rects(aspects, screen_rect))
 
-            return _run_device_session(
-                client,
-                index,
-                name,
-                device,
-                batch_number,
-                config,
-                progress,
-                stop,
-                sleep_fn,
-                clock_fn,
-                generator,
-                rects[position],
-            )
+            gap_sec = max(0, int(config.device_gap_sec))
 
-        with ThreadPoolExecutor(max_workers=max(1, len(chunk))) as pool:
-            futures = [pool.submit(run_one, item) for item in enumerate(chunk)]
-            for future in futures:
-                report.devices.append(future.result())
+            def run_one(pos_item):
+                position, (index, name, device) = pos_item
+                needs_launch = not device.get("is_process_started")
+                if needs_launch and position > 0 and gap_sec > 0:
+                    total_delay = position * gap_sec
+                    gap_deadline = clock_fn() + total_delay
+                    while True:
+                        if stop():
+                            rep = DeviceReport(
+                                name=name,
+                                index=str(index),
+                                batch=batch_number,
+                                status="stopped",
+                                message="Dihentikan oleh pengguna.",
+                                started_at=_now_iso(),
+                                finished_at=_now_iso(),
+                            )
+                            _emit(progress, rep, "stop", rep.message, "stopped")
+                            return rep
+                        remaining_gap = max(0.0, gap_deadline - clock_fn())
+                        if remaining_gap <= 0:
+                            break
+                        if progress is not None:
+                            progress(
+                                {
+                                    "name": name,
+                                    "index": str(index),
+                                    "batch": batch_number,
+                                    "cycle": cycle,
+                                    "phase": "gap",
+                                    "message": (
+                                        f"Menunggu jeda {int(round(remaining_gap))} detik sebelum "
+                                        "menyalakan device…"
+                                    ),
+                                    "status": "",
+                                    "remaining_sec": int(round(remaining_gap)),
+                                }
+                            )
+                        chunk_gap = min(1.0, remaining_gap)
+                        sleep_fn(chunk_gap)
 
-        if stop():
+                return _run_device_session(
+                    client,
+                    index,
+                    name,
+                    device,
+                    batch_number,
+                    config,
+                    progress,
+                    stop,
+                    sleep_fn,
+                    clock_fn,
+                    generator,
+                    rects[position],
+                )
+
+            with ThreadPoolExecutor(max_workers=max(1, len(chunk))) as pool:
+                futures = [pool.submit(run_one, item) for item in enumerate(chunk)]
+                for future in futures:
+                    report.devices.append(future.result())
+
+            if stop():
+                stopped = True
+                break
+
+        if stopped or stop():
             stopped = True
             break
+
+        # Cek apakah perlu loop lagi
+        has_next_cycle = False
+        if config.loop_mode == "infinite":
+            has_next_cycle = True
+        elif config.loop_mode == "count" and cycle < config.loop_count:
+            has_next_cycle = True
+
+        if not has_next_cycle:
+            break
+
+        # Jeda antar siklus loop
+        cycle_delay = max(0, int(config.loop_delay_sec))
+        if cycle_delay > 0:
+            loop_deadline = clock_fn() + cycle_delay
+            while True:
+                if stop():
+                    stopped = True
+                    break
+                remaining_loop = max(0.0, loop_deadline - clock_fn())
+                if remaining_loop <= 0:
+                    break
+                if progress is not None:
+                    progress(
+                        {
+                            "name": "",
+                            "index": "",
+                            "batch": 0,
+                            "cycle": cycle,
+                            "phase": "loop_wait",
+                            "message": (
+                                f"Batch selesai. Menunggu jeda {int(round(remaining_loop))} detik "
+                                f"sebelum memulai siklus berikutnya…"
+                            ),
+                            "status": "",
+                            "remaining_sec": int(round(remaining_loop)),
+                        }
+                    )
+                chunk_sleep = min(1.0, remaining_loop)
+                sleep_fn(chunk_sleep)
+
+        if stopped or stop():
+            stopped = True
+            break
+
+        cycle += 1
 
     if stopped:
         report.stopped_by_user = True

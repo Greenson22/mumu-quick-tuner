@@ -31,9 +31,11 @@ from app.services.automation import (
     AutomationConfig,
     AutomationStore,
     KEY_LABELS,
+    LOOP_MODES,
     ScriptStep,
     looks_like_package,
 )
+from app.services.recorder import ActionRecorder, find_mumu_windows
 from app.services.groups import GroupStore
 from app.ui.sections import ScrollSection
 from app.ui.widgets import Card, checkbox
@@ -81,6 +83,7 @@ class StepDialog(QDialog):
         ("swipe", "Swipe"),
         ("wait", "Tunggu"),
         ("key", "Tombol"),
+        ("text", "Ketik Teks"),
     ]
 
     def __init__(
@@ -110,6 +113,8 @@ class StepDialog(QDialog):
         for key, label in KEY_LABELS.items():
             self.key_combo.addItem(label, key)
         self.key_combo.setCurrentIndex(max(0, self.key_combo.findData(initial.key)))
+        self.text_input = QLineEdit(initial.text)
+        self.text_input.setPlaceholderText("Teks yang akan diketik di Android…")
         self.wait_spin = self._spin(0, 600000, initial.delay_ms, step=100)
         self.delay_spin = self._spin(0, 600000, initial.delay_ms, step=100)
 
@@ -126,6 +131,7 @@ class StepDialog(QDialog):
         self.form.addRow("Swipe dari → ke", self._swipe_holder)
         self.form.addRow("Durasi swipe (ms)", self.swipe_duration)
         self.form.addRow("Tombol", self.key_combo)
+        self.form.addRow("Teks", self.text_input)
         self.form.addRow("Durasi tunggu (ms)", self.wait_spin)
         self.form.addRow("Jeda setelah aksi (ms)", self.delay_spin)
 
@@ -198,6 +204,7 @@ class StepDialog(QDialog):
         self._show_field(self._swipe_holder, action == "swipe")
         self._show_field(self.swipe_duration, action == "swipe")
         self._show_field(self.key_combo, action == "key")
+        self._show_field(self.text_input, action == "text")
         self._show_field(self.wait_spin, action == "wait")
         self._show_field(self.delay_spin, action != "wait")
 
@@ -241,6 +248,13 @@ class StepDialog(QDialog):
                 delay_ms=self.delay_spin.value(),
             )
 
+        if action == "text":
+            return ScriptStep(
+                action="text",
+                text=self.text_input.text().strip(),
+                delay_ms=self.delay_spin.value(),
+            )
+
         return ScriptStep(
             action="key",
             key=str(self.key_combo.currentData()),
@@ -248,14 +262,187 @@ class StepDialog(QDialog):
         )
 
 
+class RecordDialog(QDialog):
+    """Dialog untuk merekam aksi mouse & keyboard langsung dari jendela MuMu."""
+
+    stepRecorded = pyqtSignal(object)
+
+    def __init__(
+        self,
+        ref_width: int = 1280,
+        ref_height: int = 720,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Perekam Aksi Otomatis (Macro Recorder)")
+        self.resize(540, 420)
+        self.ref_width = ref_width
+        self.ref_height = ref_height
+
+        self.recorder: ActionRecorder | None = None
+        self.recorded_steps: list[ScriptStep] = []
+
+        self.window_combo = QComboBox()
+        self.refresh_btn = QPushButton("Refresh Jendela")
+        self.refresh_btn.clicked.connect(self._refresh_windows)
+
+        win_row = QHBoxLayout()
+        win_row.addWidget(QLabel("Jendela Emulator:"))
+        win_row.addWidget(self.window_combo, 1)
+        win_row.addWidget(self.refresh_btn)
+
+        self.start_btn = QPushButton("● Mulai Rekam")
+        self.start_btn.setObjectName("primary")
+        self.stop_btn = QPushButton("■ Selesai Rekam (F10)")
+        self.stop_btn.setObjectName("danger")
+        self.stop_btn.setEnabled(False)
+
+        ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(self.start_btn)
+        ctrl_row.addWidget(self.stop_btn)
+        ctrl_row.addStretch(1)
+
+        self.status_label = QLabel(
+            "Pilih jendela emulator acuan, lalu klik 'Mulai Rekam'. "
+            "Aksi klik, geser, dan ketik akan dicatat otomatis."
+        )
+        self.status_label.setObjectName("hint")
+        self.status_label.setWordWrap(True)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["No", "Aksi", "Jeda"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+
+        box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.ok_button = box.button(QDialogButtonBox.StandardButton.Ok)
+        if self.ok_button:
+            self.ok_button.setText("Terapkan ke Script")
+            self.ok_button.setEnabled(False)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self._cancel_and_reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+        layout.addLayout(win_row)
+        layout.addLayout(ctrl_row)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(box)
+
+        self.start_btn.clicked.connect(self._start_recording)
+        self.stop_btn.clicked.connect(self._stop_recording)
+        self.stepRecorded.connect(self._on_step_recorded)
+
+        self._refresh_windows()
+
+    def _refresh_windows(self) -> None:
+        self.window_combo.clear()
+        windows = find_mumu_windows()
+        for hwnd, title in windows:
+            self.window_combo.addItem(f"{title} (HWND: {hwnd})", hwnd)
+
+        if not windows:
+            self.window_combo.addItem("Tidak ada jendela MuMu terdeteksi", 0)
+            self.start_btn.setEnabled(False)
+        else:
+            self.start_btn.setEnabled(True)
+
+    def _start_recording(self) -> None:
+        hwnd = self.window_combo.currentData()
+        if not hwnd:
+            QMessageBox.warning(
+                self, "Jendela belum dipilih", "Pilih jendela emulator MuMu terlebih dahulu."
+            )
+            return
+
+        self.recorded_steps.clear()
+        self.table.setRowCount(0)
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.refresh_btn.setEnabled(False)
+        self.window_combo.setEnabled(False)
+        if self.ok_button:
+            self.ok_button.setEnabled(False)
+
+        self.status_label.setText(
+            "🔴 SEDANG MEREKAM… Silakan berinteraksi (klik, swipe, ketik) di jendela emulator. "
+            "Tekan tombol 'Selesai Rekam' atau shortcut F10 saat selesai."
+        )
+
+        self.recorder = ActionRecorder(
+            target_hwnd=hwnd,
+            ref_width=self.ref_width,
+            ref_height=self.ref_height,
+            on_step_recorded=lambda step: self.stepRecorded.emit(step),
+        )
+        self.recorder.start()
+
+    def _stop_recording(self) -> None:
+        if self.recorder:
+            steps = self.recorder.stop()
+            self.recorded_steps = steps
+            self.recorder = None
+
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.refresh_btn.setEnabled(True)
+        self.window_combo.setEnabled(True)
+        if self.ok_button:
+            self.ok_button.setEnabled(bool(self.recorded_steps))
+
+        self.status_label.setText(
+            f"Perekaman selesai. Total {len(self.recorded_steps)} aksi berhasil direkam. "
+            "Klik 'Terapkan ke Script' untuk menyimpan."
+        )
+
+    def _on_step_recorded(self, step: ScriptStep) -> None:
+        self.recorded_steps.append(step)
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self.table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+        self.table.setItem(row, 1, QTableWidgetItem(step.describe()))
+        self.table.setItem(row, 2, QTableWidgetItem(f"{step.delay_ms} ms"))
+        self.table.scrollToBottom()
+
+    def _cancel_and_reject(self) -> None:
+        if self.recorder:
+            self.recorder.stop()
+            self.recorder = None
+        self.reject()
+
+    def closeEvent(self, event) -> None:
+        if self.recorder:
+            self.recorder.stop()
+            self.recorder = None
+        super().closeEvent(event)
+
+
 class ScriptDialog(QDialog):
     """Editor daftar langkah untuk satu aplikasi."""
 
-    def __init__(self, app: AutomationApp, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        app: AutomationApp,
+        ref_width: int = 1280,
+        ref_height: int = 720,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Script — {app.display_name}")
-        self.resize(680, 420)
+        self.resize(750, 440)
         self.app = app
+        self.ref_width = ref_width
+        self.ref_height = ref_height
         self.steps = [ScriptStep.from_dict(step.to_dict()) for step in app.steps]
         self.result_steps: list[ScriptStep] = []
 
@@ -284,6 +471,9 @@ class ScriptDialog(QDialog):
         add_swipe = QPushButton("+ Swipe")
         add_wait = QPushButton("+ Tunggu")
         add_key = QPushButton("+ Tombol")
+        add_text = QPushButton("+ Teks")
+        record_btn = QPushButton("● Rekam Aksi…")
+        record_btn.setObjectName("primary")
         edit = QPushButton("Ubah…")
         remove = QPushButton("Hapus")
         up = QPushButton("Naik")
@@ -293,6 +483,8 @@ class ScriptDialog(QDialog):
             add_swipe,
             add_wait,
             add_key,
+            add_text,
+            record_btn,
             edit,
             remove,
             up,
@@ -302,8 +494,8 @@ class ScriptDialog(QDialog):
         buttons.addStretch(1)
 
         note = QLabel(
-            "Contoh: tap sidebar (60, 400) → tunggu 1000 ms → tap halaman "
-            "(300, 200). Langkah dijalankan setelah aplikasi terbuka."
+            "Klik '● Rekam Aksi…' untuk merekam klik, geser, dan ketik langsung "
+            "dari jendela emulator secara otomatis. Atau tambahkan langkah manual."
         )
         note.setObjectName("hint")
         note.setWordWrap(True)
@@ -327,6 +519,8 @@ class ScriptDialog(QDialog):
         add_swipe.clicked.connect(lambda: self._add("swipe"))
         add_wait.clicked.connect(lambda: self._add("wait"))
         add_key.clicked.connect(lambda: self._add("key"))
+        add_text.clicked.connect(lambda: self._add("text"))
+        record_btn.clicked.connect(self._record)
         edit.clicked.connect(self._edit)
         remove.clicked.connect(self._remove)
         up.clicked.connect(lambda: self._move(-1))
@@ -359,6 +553,8 @@ class ScriptDialog(QDialog):
             )
         if step.action == "wait":
             return f"{step.delay_ms} ms"
+        if step.action == "text":
+            return f'"{step.text}"'
         return KEY_LABELS.get(step.key, step.key)
 
     def _selected_row(self) -> int:
@@ -370,6 +566,17 @@ class ScriptDialog(QDialog):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.steps.append(dialog.step())
             self._refresh()
+
+    def _record(self) -> None:
+        dialog = RecordDialog(
+            ref_width=self.ref_width,
+            ref_height=self.ref_height,
+            parent=self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if dialog.recorded_steps:
+                self.steps.extend(dialog.recorded_steps)
+                self._refresh()
 
     def _edit(self) -> None:
         row = self._selected_row()
@@ -572,8 +779,38 @@ class AutomationSection(ScrollSection):
         card.add_row(
             "Jeda antar device",
             self.gap_spin,
-            "Jeda saat menyalakan device berikutnya dalam satu batch. "
-            "Default 30 detik.",
+            "Waktu tunggu sebelum menyalakan/mengeksekusi device berikutnya. "
+            "Bisa ditentukan (misal 60 detik).",
+        )
+
+        loop_holder = QWidget()
+        loop_row = QHBoxLayout(loop_holder)
+        loop_row.setContentsMargins(0, 0, 0, 0)
+        loop_row.setSpacing(8)
+
+        self.loop_mode_combo = QComboBox()
+        self.loop_mode_combo.addItem("Sekali jalan (tanpa loop)", "none")
+        self.loop_mode_combo.addItem("Ulangi N kali", "count")
+        self.loop_mode_combo.addItem("Infinite Loop (tanpa henti)", "infinite")
+
+        self.loop_count_spin = QSpinBox()
+        self.loop_count_spin.setRange(1, 9999)
+        self.loop_count_spin.setSuffix(" kali")
+        self.loop_count_spin.setValue(1)
+
+        loop_row.addWidget(self.loop_mode_combo)
+        loop_row.addWidget(self.loop_count_spin)
+        loop_row.addStretch(1)
+        card.add_row("Pengulangan (Loop)", loop_holder)
+
+        self.loop_delay_spin = QSpinBox()
+        self.loop_delay_spin.setRange(0, 3600)
+        self.loop_delay_spin.setSuffix(" detik")
+        card.add_row(
+            "Jeda antar pengulangan",
+            self.loop_delay_spin,
+            "Waktu istirahat setelah semua batch/device selesai sebelum mengulang lagi. "
+            "Default 60 detik.",
         )
 
         self.arrange_check = checkbox(
@@ -651,14 +888,23 @@ class AutomationSection(ScrollSection):
             self.minutes_max,
             self.ref_width,
             self.ref_height,
+            self.loop_count_spin,
+            self.loop_delay_spin,
         ):
             widget.valueChanged.connect(self._save_config)
+        self.loop_mode_combo.currentIndexChanged.connect(self._on_loop_mode_changed)
         self.arrange_check.toggled.connect(self._save_config)
         self.interaction_check.toggled.connect(self._save_config)
         self.scale_check.toggled.connect(self._save_config)
         self.group_combo.currentIndexChanged.connect(self._sync_buttons)
         self.start_button.clicked.connect(self._start)
         self.stop_button.clicked.connect(self._stop)
+
+    def _on_loop_mode_changed(self) -> None:
+        mode = str(self.loop_mode_combo.currentData())
+        self.loop_count_spin.setVisible(mode == "count")
+        self.loop_delay_spin.setEnabled(mode != "none")
+        self._save_config()
 
     def _build_apps_card(self) -> None:
         card = Card(
@@ -809,6 +1055,9 @@ class AutomationSection(ScrollSection):
             self.gap_spin,
             self.minutes_min,
             self.minutes_max,
+            self.loop_mode_combo,
+            self.loop_count_spin,
+            self.loop_delay_spin,
             self.arrange_check,
             self.interaction_check,
             self.scale_check,
@@ -935,6 +1184,12 @@ class AutomationSection(ScrollSection):
             self.gap_spin.setValue(self.config.device_gap_sec)
             self.minutes_min.setValue(self.config.duration_min_sec / 60)
             self.minutes_max.setValue(self.config.duration_max_sec / 60)
+            loop_idx = max(0, self.loop_mode_combo.findData(self.config.loop_mode))
+            self.loop_mode_combo.setCurrentIndex(loop_idx)
+            self.loop_count_spin.setValue(self.config.loop_count)
+            self.loop_delay_spin.setValue(self.config.loop_delay_sec)
+            self.loop_count_spin.setVisible(self.config.loop_mode == "count")
+            self.loop_delay_spin.setEnabled(self.config.loop_mode != "none")
             self.arrange_check.setChecked(self.config.arrange_windows)
             self.interaction_check.setChecked(self.config.interaction_enabled)
             self.scale_check.setChecked(self.config.scale_coordinates)
@@ -949,6 +1204,9 @@ class AutomationSection(ScrollSection):
             duration_min_sec=max(1, int(round(self.minutes_min.value() * 60))),
             duration_max_sec=max(1, int(round(self.minutes_max.value() * 60))),
             device_gap_sec=self.gap_spin.value(),
+            loop_mode=str(self.loop_mode_combo.currentData()),
+            loop_count=self.loop_count_spin.value(),
+            loop_delay_sec=self.loop_delay_spin.value(),
             arrange_windows=self.arrange_check.isChecked(),
             interaction_enabled=self.interaction_check.isChecked(),
             scale_coordinates=self.scale_check.isChecked(),
@@ -1049,7 +1307,12 @@ class AutomationSection(ScrollSection):
         if row < 0 or row >= len(self.config.apps):
             return
         app = self.config.apps[row]
-        dialog = ScriptDialog(app, self)
+        dialog = ScriptDialog(
+            app,
+            ref_width=self.config.reference_width,
+            ref_height=self.config.reference_height,
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         app.steps = list(dialog.result_steps)

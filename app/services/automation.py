@@ -19,14 +19,20 @@ DEFAULT_REFERENCE_WIDTH = 1280
 DEFAULT_REFERENCE_HEIGHT = 720
 DEFAULT_DEVICE_GAP_SEC = 30
 MAX_DEVICE_GAP_SEC = 600
+DEFAULT_LOOP_MODE = "none"
+DEFAULT_LOOP_COUNT = 1
+DEFAULT_LOOP_DELAY_SEC = 60
 
-STEP_ACTIONS = ("tap", "swipe", "wait", "key")
+STEP_ACTIONS = ("tap", "swipe", "wait", "key", "text")
 KEY_NAMES = {
     "back": 4,
     "home": 3,
     "task": 187,
     "enter": 66,
     "delete": 67,
+    "tab": 61,
+    "space": 62,
+    "escape": 111,
 }
 KEY_LABELS = {
     "back": "Back",
@@ -34,7 +40,11 @@ KEY_LABELS = {
     "task": "Recent apps",
     "enter": "Enter",
     "delete": "Delete",
+    "tab": "Tab",
+    "space": "Spasi",
+    "escape": "Escape",
 }
+LOOP_MODES = ("none", "count", "infinite")
 
 
 def default_automation_path() -> Path:
@@ -70,10 +80,11 @@ class ScriptStep:
     y2: int = 0
     duration_ms: int = 300
     key: str = "back"
+    text: str = ""
     delay_ms: int = 500
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "action": self.action,
             "x": self.x,
             "y": self.y,
@@ -83,6 +94,9 @@ class ScriptStep:
             "key": self.key,
             "delay_ms": self.delay_ms,
         }
+        if self.action == "text" or self.text:
+            data["text"] = self.text
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "ScriptStep":
@@ -100,6 +114,7 @@ class ScriptStep:
             y2=_to_int(data.get("y2")),
             duration_ms=max(0, _to_int(data.get("duration_ms"), 300)),
             key=key,
+            text=str(data.get("text", "")),
             delay_ms=max(0, _to_int(data.get("delay_ms"), 500)),
         )
 
@@ -118,6 +133,9 @@ class ScriptStep:
         elif self.action == "key":
             if self.key not in KEY_NAMES:
                 return f"Tombol '{self.key}' tidak dikenali."
+        elif self.action == "text":
+            if not self.text:
+                return "Teks yang akan diketik tidak boleh kosong."
         return None
 
     def describe(self) -> str:
@@ -130,6 +148,9 @@ class ScriptStep:
             )
         if self.action == "wait":
             return f"Tunggu {self.delay_ms} ms"
+        if self.action == "text":
+            preview = self.text if len(self.text) <= 20 else self.text[:17] + "..."
+            return f'Ketik "{preview}"'
         return f"Tombol {KEY_LABELS.get(self.key, self.key)}"
 
 
@@ -180,6 +201,9 @@ class AutomationConfig:
     arrange_windows: bool = True
     reference_width: int = DEFAULT_REFERENCE_WIDTH
     reference_height: int = DEFAULT_REFERENCE_HEIGHT
+    loop_mode: str = DEFAULT_LOOP_MODE
+    loop_count: int = DEFAULT_LOOP_COUNT
+    loop_delay_sec: int = DEFAULT_LOOP_DELAY_SEC
     apps: list[AutomationApp] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -193,6 +217,9 @@ class AutomationConfig:
             "scale_coordinates": self.scale_coordinates,
             "arrange_windows": self.arrange_windows,
             "reference_resolution": [self.reference_width, self.reference_height],
+            "loop_mode": self.loop_mode,
+            "loop_count": self.loop_count,
+            "loop_delay_sec": self.loop_delay_sec,
             "apps": [app.to_dict() for app in self.apps],
         }
 
@@ -222,6 +249,12 @@ class AutomationConfig:
         gap = _to_int(data.get("device_gap_sec"), DEFAULT_DEVICE_GAP_SEC)
         gap = max(0, min(MAX_DEVICE_GAP_SEC, gap))
 
+        loop_mode = str(data.get("loop_mode", DEFAULT_LOOP_MODE)).strip().lower()
+        if loop_mode not in LOOP_MODES:
+            loop_mode = DEFAULT_LOOP_MODE
+        loop_count = max(1, _to_int(data.get("loop_count"), DEFAULT_LOOP_COUNT))
+        loop_delay = max(0, min(3600, _to_int(data.get("loop_delay_sec"), DEFAULT_LOOP_DELAY_SEC)))
+
         return cls(
             batch_size=max(1, _to_int(data.get("batch_size"), DEFAULT_BATCH_SIZE)),
             duration_min_sec=max(
@@ -236,6 +269,9 @@ class AutomationConfig:
             arrange_windows=bool(data.get("arrange_windows", True)),
             reference_width=max(1, width),
             reference_height=max(1, height),
+            loop_mode=loop_mode,
+            loop_count=loop_count,
+            loop_delay_sec=loop_delay,
             apps=apps,
         )
 
@@ -255,6 +291,10 @@ class AutomationConfig:
             )
         if self.reference_width < 1 or self.reference_height < 1:
             return "Resolusi referensi script tidak valid."
+        if self.loop_count < 1:
+            return "Jumlah pengulangan batch minimal 1."
+        if not 0 <= self.loop_delay_sec <= 3600:
+            return "Jeda antar pengulangan batch harus antara 0 dan 3600 detik."
         enabled = self.enabled_apps()
         if not enabled:
             return "Aktifkan minimal satu aplikasi otomatisasi."

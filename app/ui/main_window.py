@@ -1064,10 +1064,17 @@ class MainWindow(QMainWindow):
                 f"\n\n{len(missing)} anggota grup tidak ditemukan dan akan "
                 "dilewati."
             )
+        loop_info = "Sekali jalan (tanpa loop)"
+        if config.loop_mode == "infinite":
+            loop_info = f"Infinite Loop (Tanpa Henti) — jeda antar siklus {config.loop_delay_sec} detik"
+        elif config.loop_mode == "count":
+            loop_info = f"Ulangi {config.loop_count} kali — jeda antar siklus {config.loop_delay_sec} detik"
+
         text = (
             f"Otomatisasi grup '{group}' akan dijalankan.\n\n"
             f"• Device: {len(found)} ditemukan, batch {config.batch_size}\n"
             f"• Jeda antar device: {config.device_gap_sec} detik\n"
+            f"• Pengulangan (Loop): {loop_info}\n"
             f"• Durasi acak per device: {minutes_min:g}–{minutes_max:g} menit\n"
             f"• Susun jendela: "
             f"{'aktif' if config.arrange_windows else 'nonaktif'}\n"

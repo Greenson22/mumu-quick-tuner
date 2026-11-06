@@ -343,6 +343,48 @@ class RunAutomationTests(unittest.TestCase):
         # Pastikan hitung mundur nilainya menurun
         self.assertEqual(remaining_values, sorted(remaining_values, reverse=True))
 
+    def test_text_step_execution(self) -> None:
+        client = FakeClient()
+        config = self._config(
+            app_count=1,
+            batch_size=1,
+            apps=[
+                AutomationApp(
+                    package="com.example.app0",
+                    steps=[
+                        ScriptStep(action="text", text="halo dunia", delay_ms=100),
+                    ],
+                )
+            ],
+        )
+        report = self._run(
+            client,
+            [("0", "device0", {"name": "device0"})],
+            config,
+        )
+        self.assertEqual(report.devices[0].status, "success")
+        adb_calls = [c[2] for c in client.calls if c[0] == "adb_shell"]
+        self.assertTrue(any("input text" in cmd and "halo%sdunia" in cmd for cmd in adb_calls))
+
+    def test_batch_loop_count_and_delay(self) -> None:
+        client = FakeClient()
+        config = self._config(
+            app_count=1,
+            batch_size=1,
+            loop_mode="count",
+            loop_count=2,
+            loop_delay_sec=15,
+        )
+        report = self._run(
+            client,
+            [("0", "device0", {"name": "device0"})],
+            config,
+        )
+        # Total harus menjalankan 2 siklus
+        self.assertEqual(len(report.devices), 2)
+        # Clock mencakup jeda antar siklus (minimal 15 detik)
+        self.assertGreaterEqual(self.clock.now(), 15.0)
+
 
 if __name__ == "__main__":
     unittest.main()
