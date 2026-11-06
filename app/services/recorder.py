@@ -334,21 +334,26 @@ class ActionRecorder:
 
     def _client_to_ref(self, screen_x: int, screen_y: int) -> tuple[int, int] | None:
         user32 = ctypes.windll.user32
+        if not self.target_hwnd:
+            return None
 
-        client_rect = get_window_client_rect(self.target_hwnd)
-        if client_rect and client_rect[2] > 10 and client_rect[3] > 10:
-            cx, cy, cw, ch = client_rect
-        else:
-            wrect = RECT()
-            if not user32.GetWindowRect(self.target_hwnd, ctypes.byref(wrect)):
-                return None
-            cx, cy = wrect.left, wrect.top
-            cw = max(1, wrect.right - wrect.left)
-            ch = max(1, wrect.bottom - wrect.top)
+        # Dapatkan ukuran client viewport
+        rect = RECT()
+        if not user32.GetClientRect(self.target_hwnd, ctypes.byref(rect)):
+            return None
+        cw = max(1, rect.right - rect.left)
+        ch = max(1, rect.bottom - rect.top)
 
-        if not (cx <= screen_x <= cx + cw and cy <= screen_y <= cy + ch):
-            pt = POINT(screen_x, screen_y)
-            hwnd_under = user32.WindowFromPoint(pt)
+        # Ubah posisi layar ke koordinat client menggunakan Win32 ScreenToClient langsung
+        pt = POINT(screen_x, screen_y)
+        if not user32.ScreenToClient(self.target_hwnd, ctypes.byref(pt)):
+            return None
+
+        # Cek apakah kursor berada di dalam area jendela render
+        if not (0 <= pt.x <= cw and 0 <= pt.y <= ch):
+            # Cek apakah window di bawah kursor memiliki PID yang sama
+            pt_screen = POINT(screen_x, screen_y)
+            hwnd_under = user32.WindowFromPoint(pt_screen)
             if hwnd_under and self.target_pid:
                 under_pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd_under, ctypes.byref(under_pid))
@@ -357,11 +362,11 @@ class ActionRecorder:
             else:
                 return None
 
-        rel_x = max(0, min(cw, screen_x - cx))
-        rel_y = max(0, min(ch, screen_y - cy))
+        clamped_x = max(0, min(cw, pt.x))
+        clamped_y = max(0, min(ch, pt.y))
 
-        scaled_x = int(round(rel_x * self.ref_width / cw))
-        scaled_y = int(round(rel_y * self.ref_height / ch))
+        scaled_x = int(round(clamped_x * self.ref_width / cw))
+        scaled_y = int(round(clamped_y * self.ref_height / ch))
         return (
             max(0, min(self.ref_width - 1, scaled_x)),
             max(0, min(self.ref_height - 1, scaled_y)),

@@ -273,6 +273,7 @@ class RecordDialog(QDialog):
         self,
         ref_width: int = 1280,
         ref_height: int = 720,
+        client=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -280,6 +281,7 @@ class RecordDialog(QDialog):
         self.resize(600, 460)
         self.ref_width = ref_width
         self.ref_height = ref_height
+        self.client = client
 
         self.recorder: ActionRecorder | None = None
         self.recorded_steps: list[ScriptStep] = []
@@ -359,15 +361,78 @@ class RecordDialog(QDialog):
 
     def _refresh_windows(self) -> None:
         self.window_combo.clear()
+        found_any = False
+
+        # 1. Prioritaskan device aktif dari MuMuClient langsung
+        if self.client:
+            try:
+                devices = self.client.list_devices()
+            except Exception:
+                devices = {}
+
+            for index, dev in sorted(devices.items(), key=lambda x: str(x[0])):
+                if not dev.get("is_android_started"):
+                    continue
+
+                name = dev.get("name", f"Device {index}")
+                render_hex = str(dev.get("render_wnd") or "").strip()
+                main_hex = str(dev.get("main_wnd") or "").strip()
+
+                render_hwnd = int(render_hex, 16) if render_hex else 0
+                main_hwnd = int(main_hex, 16) if main_hex else 0
+                target_hwnd = render_hwnd or main_hwnd
+
+                if not target_hwnd:
+                    continue
+
+                screen_size = None
+                try:
+                    screen_size = self.client.get_screen_size(index)
+                except Exception:
+                    screen_size = None
+
+                w = screen_size[0] if screen_size else self.ref_width
+                h = screen_size[1] if screen_size else self.ref_height
+
+                label = f"📱 [Device {index}] {name} ({w}×{h})"
+                data = {
+                    "hwnd": target_hwnd,
+                    "width": w,
+                    "height": h,
+                    "index": str(index),
+                }
+                self.window_combo.addItem(label, data)
+                found_any = True
+
+        # 2. Tambahkan jendela yang terdeteksi via EnumWindows
         windows = find_mumu_windows()
         for hwnd, title in windows:
-            self.window_combo.addItem(f"{title} (HWND: {hwnd})", hwnd)
+            # Hindari duplikat jika HWND sudah ada
+            already = False
+            for i in range(self.window_combo.count()):
+                existing_data = self.window_combo.itemData(i)
+                if isinstance(existing_data, dict) and existing_data.get("hwnd") == hwnd:
+                    already = True
+                    break
+                elif existing_data == hwnd:
+                    already = True
+                    break
 
-        if not windows:
+            if not already:
+                data = {
+                    "hwnd": hwnd,
+                    "width": self.ref_width,
+                    "height": self.ref_height,
+                    "index": "",
+                }
+                self.window_combo.addItem(f"{title} (HWND: {hwnd})", data)
+                found_any = True
+
+        if not found_any:
             self.window_combo.addItem(
-                "Tidak terdeteksi — gunakan '🎯 Pilih dengan Klik…'", 0
+                "Tidak terdeteksi — gunakan '🎯 Pilih dengan Klik…'", None
             )
-        self.start_btn.setEnabled(bool(windows))
+        self.start_btn.setEnabled(found_any)
 
     def _start_pick(self) -> None:
         self._pick_countdown = 5
@@ -388,7 +453,6 @@ class RecordDialog(QDialog):
         result = pick_window_under_cursor()
         if result is not None:
             hwnd, title = result
-            # Jangan tangkap klik pada dialog kita sendiri
             if hwnd != int(self.winId()):
                 parent_hwnd = 0
                 if self.parent() is not None:
@@ -415,27 +479,29 @@ class RecordDialog(QDialog):
 
         if hwnd:
             label = f"{title} (HWND: {hwnd})" if title else f"Window (HWND: {hwnd})"
-            idx = self.window_combo.findData(hwnd)
-            if idx < 0:
-                self.window_combo.insertItem(0, label, hwnd)
-                self.window_combo.setCurrentIndex(0)
-            else:
-                self.window_combo.setCurrentIndex(idx)
+            data = {
+                "hwnd": hwnd,
+                "width": self.ref_width,
+                "height": self.ref_height,
+                "index": "",
+            }
+            self.window_combo.insertItem(0, label, data)
+            self.window_combo.setCurrentIndex(0)
             self.start_btn.setEnabled(True)
             self.status_label.setText(
                 f"✅ Jendela berhasil dipilih: {label}\n"
                 "Klik 'Mulai Rekam' untuk mulai merekam aksi."
             )
         else:
-            self.start_btn.setEnabled(self.window_combo.currentData() not in (None, 0))
+            self.start_btn.setEnabled(self.window_combo.currentData() is not None)
             self.status_label.setText(
                 "⚠️ Tidak ada jendela yang terdeteksi. Coba lagi dengan "
                 "'🎯 Pilih dengan Klik…' dan klik tepat di jendela emulator."
             )
 
     def _start_recording(self) -> None:
-        hwnd = self.window_combo.currentData()
-        if not hwnd:
+        data = self.window_combo.currentData()
+        if not data:
             QMessageBox.warning(
                 self, "Jendela belum dipilih",
                 "Pilih jendela emulator MuMu terlebih dahulu.\n\n"
@@ -443,6 +509,26 @@ class RecordDialog(QDialog):
                 "'🎯 Pilih dengan Klik…' untuk memilih secara manual.",
             )
             return
+
+        if isinstance(data, dict):
+            hwnd = data.get("hwnd", 0)
+            self.ref_width = data.get("width", self.ref_width)
+            self.ref_height = data.get("height", self.ref_height)
+            index = data.get("index", "")
+        else:
+            hwnd = int(data)
+            index = ""
+
+        if not hwnd:
+            QMessageBox.warning(self, "Jendela tidak valid", "Jendela emulator tidak valid.")
+            return
+
+        # Aktifkan visual touch feedback pada Android jika ada client
+        if self.client and index:
+            try:
+                self.client.adb_shell(index, "settings put system show_touches 1")
+            except Exception:
+                pass
 
         self.recorded_steps.clear()
         self.table.setRowCount(0)
@@ -455,7 +541,8 @@ class RecordDialog(QDialog):
             self.ok_button.setEnabled(False)
 
         self.status_label.setText(
-            "🔴 SEDANG MEREKAM… Silakan berinteraksi (klik, swipe, ketik) di jendela emulator. "
+            f"🔴 SEDANG MEREKAM ({self.ref_width}×{self.ref_height})… "
+            "Silakan klik, swipe, dan ketik di layar emulator. "
             "Tekan tombol 'Selesai Rekam' atau shortcut F10 saat selesai."
         )
 
@@ -924,6 +1011,7 @@ class ScriptDialog(QDialog):
         dialog = RecordDialog(
             ref_width=self.ref_width,
             ref_height=self.ref_height,
+            client=self.client,
             parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
