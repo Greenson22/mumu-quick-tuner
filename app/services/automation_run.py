@@ -6,6 +6,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -249,16 +250,34 @@ def _run_step(
         _sleep_interruptibly(step.delay_ms / 1000.0, sleep, should_stop)
 
 
-def _shutdown(client, index: str, wait: bool = True) -> None:
-    try:
-        client.control(index, "shutdown")
-    except Exception:  # noqa: BLE001 - best effort
-        pass
+_SHUTDOWN_LOCK = threading.Lock()
 
-    if wait:
+
+def _shutdown(
+    client,
+    index: str,
+    wait: bool = True,
+    sleep_fn: SleepCallback | None = None,
+) -> None:
+    """Matikan satu device secara aman dan berurutan agar disk/hypervisor tidak freeze."""
+    sleeper = sleep_fn or _default_sleep
+    with _SHUTDOWN_LOCK:
         try:
-            client.wait_stopped(index, 10)
+            client.control(index, "shutdown")
         except Exception:  # noqa: BLE001 - best effort
+            pass
+
+        if wait:
+            try:
+                # Waktu tunggu ditingkatkan menjadi 30 detik agar VDI/disk selesai sync
+                client.wait_stopped(index, 30)
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+
+        # Jeda pendinginan singkat agar OS dan VMM melepas lock I/O/memori
+        try:
+            sleeper(1.0)
+        except Exception:  # noqa: BLE001
             pass
 
 
@@ -508,29 +527,30 @@ def _run_device_session(
     finally:
         report.finished_at = _now_iso()
         if report.status == "stopped":
-            _shutdown(client, index)
+            _shutdown(client, index, wait=True, sleep_fn=sleep)
         elif report.status == "failed":
-            _shutdown(client, index)
+            _shutdown(client, index, wait=True, sleep_fn=sleep)
         elif report.status == "success":
             _emit(progress, report, "shutdown", "Mematikan device…")
-            _shutdown(client, index)
+            _shutdown(client, index, wait=True, sleep_fn=sleep)
             _emit(progress, report, "done", report.message, "success")
 
     return report
 
 
-def _final_shutdown(client, targets: list[tuple[str, str, dict]]) -> None:
-    """Pastikan semua device yang terlibat benar-benar mati."""
+def _final_shutdown(
+    client,
+    targets: list[tuple[str, str, dict]],
+    sleep_fn: SleepCallback | None = None,
+) -> None:
+    """Pastikan semua device yang terlibat benar-benar mati secara sekuensial."""
     if not targets:
         return
 
-    def stop_one(index: str) -> None:
-        if not _is_running(client, index):
-            return
-        _shutdown(client, index, wait=True)
-
-    with ThreadPoolExecutor(max_workers=max(1, min(len(targets), 4))) as pool:
-        list(pool.map(stop_one, [index for index, _name, _device in targets]))
+    sleeper = sleep_fn or _default_sleep
+    for index, _name, _device in targets:
+        if _is_running(client, index):
+            _shutdown(client, index, wait=True, sleep_fn=sleeper)
 
 
 def run_automation(
@@ -701,6 +721,11 @@ def run_automation(
                 for future in futures:
                     report.devices.append(future.result())
 
+            # Setelah semua device dalam batch selesai dimatikan, beri jeda relaksasi
+            # bagi kernel disk caching & hypervisor sebelum lanjut ke batch atau siklus berikutnya
+            if not stop():
+                sleep_fn(3.0)
+
             if stop():
                 stopped = True
                 break
@@ -774,7 +799,7 @@ def run_automation(
     elif stop():
         report.stopped_by_user = True
 
-    _final_shutdown(client, targets)
+    _final_shutdown(client, targets, sleep_fn=sleep_fn)
     report.finished_at = _now_iso()
     write_report(report, report_dir)
     return report

@@ -880,7 +880,7 @@ class MainWindow(QMainWindow):
             message += f"\n\n{len(relaunched)} device berjalan dinyalakan kembali."
 
         QMessageBox.information(self, "Batch selesai", message)
-        self.refresh()
+        QTimer.singleShot(1500, self.refresh)
 
     def _retry_failed(self) -> None:
         if self._busy or not self._last_failed:
@@ -1173,7 +1173,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Otomatisasi selesai", report.summary_text()
         )
-        self.refresh()
+        QTimer.singleShot(1500, self.refresh)
 
     def _on_automation_error(self, message: str) -> None:
         self._leave_automation_mode()

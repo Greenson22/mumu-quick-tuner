@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 
@@ -118,6 +119,7 @@ class MuMuClient:
     def __init__(self, manager: Path, timeout: int = 120) -> None:
         self.manager = Path(manager)
         self.timeout = timeout
+        self._cmd_lock = threading.Lock()
 
     # ------------------------------------------------------------------ core
     def _invoke(self, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess:
@@ -140,16 +142,17 @@ class MuMuClient:
             env.pop(key, None)
 
         try:
-            return subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout or self.timeout,
-                creationflags=_no_window_flag(),
-                env=env,
-            )
+            with self._cmd_lock:
+                return subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout or self.timeout,
+                    creationflags=_no_window_flag(),
+                    env=env,
+                )
         except subprocess.TimeoutExpired as exc:
             raise MuMuError(
                 f"MuMuManager tidak merespons dalam {timeout or self.timeout} detik."
